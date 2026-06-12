@@ -1,0 +1,17 @@
+menu "Configuration du système"
+
+    config I2C_SCL_GPIO
+        int "GPIO pour I2C SCL"
+        default 8
+
+    config I2C_SDA_GPIO
+        int "GPIO pour I2C SDA"
+        default 9
+
+    config I2C_SCANNER_DEBUG
+        bool "Activer le scanner I2C au démarrage"
+        default y
+        help
+            Affiche la liste des périphériques I2C détectés lors de l'initialisation.
+
+endmenu

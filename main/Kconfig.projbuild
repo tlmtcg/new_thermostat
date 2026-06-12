@@ -1,0 +1,22 @@
+menu "Thermostat Configuration"
+
+    menu "Matériel et Capteurs"
+        rsource "../components/dht/Kconfig.dht"
+        rsource "../components/sht31/Kconfig.sht31"
+        rsource "../components/relay/Kconfig.relay"
+    endmenu
+
+    menu "Evènements"
+        rsource "../components/event_bus/Kconfig.event_bus"
+    endmenu
+
+    menu "Thermostat"
+        rsource "../components/thermostat_task/Kconfig.thermostat_task"
+    endmenu
+
+    menu "Système"
+        rsource "../components/system_manager/Kconfig.system_manager"
+        rsource "../components/wifi_app/Kconfig.wifi"
+    endmenu
+
+endmenu

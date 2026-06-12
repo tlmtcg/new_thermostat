@@ -1,0 +1,32 @@
+menu "Relais Configuration"
+
+    config RELAY_GPIO_PIN
+        int "Relay GPIO Pin"
+        range 0 48
+        default 20
+        help
+            Le numero du GPIO sur lequel est branche le relais de commande de la chaudiere.
+
+    config RELAY_INVERTED
+        bool "Inverser la logique du relais"
+        default y
+        help
+            Cochez si le relais s'active avec un niveau BAS (0V).
+
+    config RELAY_MIN_DELAY_SEC
+        int "Delai minimum entre commutations (secondes)"
+        range 0 3600
+        default 60
+        help
+            Empeche le relais de changer d'etat trop rapidement pour proteger la chaudiere.
+
+    config RELAY_TASK_PRIORITY
+        int "DHT task priority"
+        default 5
+    
+    config RELAY_STACK_SIZE
+        int "DHT stack size"
+        default 4096
+
+    endmenu
+

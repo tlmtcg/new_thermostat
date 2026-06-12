@@ -1,0 +1,11 @@
+menu "Event bus"
+
+    config EVENT_LOW_DROP_THRESHOLD
+        int "EVENT LOW DROP THRESHOLD"
+        default 100
+
+    config SUBSCRIBER_QUEUE_SIZE
+        int "SUBSCRIBER QUEUE SIZE"
+        default 10
+
+endmenu

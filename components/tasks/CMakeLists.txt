@@ -1,0 +1,10 @@
+idf_component_register(
+    SRCS 
+        "tasks.c" 
+    INCLUDE_DIRS 
+        "include"
+    REQUIRES
+        dht
+        thermostat_task
+           sht31
+)              

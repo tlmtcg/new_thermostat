@@ -1,0 +1,71 @@
+menu "Sensor SHT31"
+
+    config SHT31_ENABLE
+        bool "Enable SHT31"
+        default y
+        help
+            Activer ou désactiver le pilote et la tâche du capteur SHT31.
+
+    config SHT31_DEFAULT_ADDR
+        hex "SHT31 I2C Address"
+        default 68
+        help
+            Adresse I2C par défaut du SHT31 (Généralement 0x44, ou 0x45 si pin ADDR à l'état haut).
+
+    config SHT31_DEFAULT_READ_INTERVAL_MS
+        int "SHT31 Read Interval (ms)"
+        default 5000
+        help
+            Intervalle de lecture par défaut (en ms).
+
+    config SHT31_TASK_PRIORITY
+        int "SHT31 task priority"
+        default 6
+    
+    config SHT31_STACK_SIZE
+        int "SHT31 stack size"
+        default 4096
+
+    config SHT31_TEMP_DELTA
+        string "SHT31 Temperature Delta (°C)"
+        default "0.1"
+        help
+            Variation minimale de température pour déclencher une publication (Format: float string).
+
+    config SHT31_HUM_DELTA
+        string "SHT31 Humidity Delta (%)"
+        default "1.0"
+        help
+            Variation minimale d'humidité pour déclencher une publication (Format: float string).
+
+    config SHT31_HEARTBEAT_MS
+        int "SHT31 Heartbeat Interval (ms)"
+        default 60000
+        help
+            Temps maximum (en ms) avant de forcer une publication, même sans variation de delta.
+
+    config SHT31_ERROR_LOG_FIRST_COUNT
+        int "SHT31 Error Log First Count"
+        default 2
+        help
+            Nombre d'erreurs consécutives avant d'afficher le premier log d'avertissement (Filtre le bruit unique).
+
+    config SHT31_ERROR_LOG_EVERY_COUNT
+        int "SHT31 Error Log Every Count"
+        default 10
+        help
+            Intervalle de logs pour les erreurs consécutives les suivantes.
+
+    config SHT31_RECOVER_AFTER_CONSECUTIVE_ERRORS
+        int "SHT31 Recover After Consecutive Errors"
+        default 5
+        help
+            Nombre d'erreurs consécutives avant de tenter une récupération matérielle. (Doit être > FIRST_COUNT).
+
+    config SHT31_RECOVER_INTERVAL_CYCLES
+        int "SHT31 Recover Interval Cycles"
+        default 5
+        help
+            Évite de saturer le bus en ignorant le recover pendant X cycles avant la prochaine tentative.
+
+endmenu

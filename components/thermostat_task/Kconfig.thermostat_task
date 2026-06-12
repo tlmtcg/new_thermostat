@@ -1,0 +1,16 @@
+menu "Thermostat Task"
+
+    config THERMOSTAT_TASK_INTERVAL_MS
+        int "DHT READ INTERVAL MS"
+        range 2000 10000
+        default 2000
+
+    config THERMOSTAT_TASK_PRIORITY
+        int "DHT task priority"
+        default 5
+    
+    config THERMOSTAT_STACK_SIZE
+        int "DHT stack size"
+        default 4096
+
+endmenu

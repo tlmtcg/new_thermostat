@@ -1,0 +1,56 @@
+menu "Sensor DHT"
+
+    config BIT_DHT_EN
+        bool "Enable DHT"
+        default y
+
+    config DHT_GPIO_PIN
+        int "DHT GPIO PIN"
+        range 0 48
+        default 7
+
+    config DHT_TYPE
+        int "DHT TYPE"
+        default 0
+    
+    config DHT_READ_INTERVAL_MS
+        int "DHT READ INTERVAL MS"
+        range 2000 10000
+        default 2000
+
+    config DHT_TASK_PRIORITY
+        int "DHT task priority"
+        default 6
+    
+    config DHT_STACK_SIZE
+        int "DHT stack size"
+        default 4096
+
+    config DHT_PANNE_SEUIL_CONSECUTIF
+        int "DHT PANNE SEUIL CONSECUTIF"
+        default 3
+        range 1 20
+
+    config DHT_SETUP_DELAY
+        int "DHT SETUP DELAY"
+        default 500
+
+    config DHT_TEMP_DELTA
+        string "DHT Temperature Delta (°C)"
+        default "0.1"
+        help
+            Variation minimale de température pour déclencher une publication (Format: float string).
+
+    config DHT_HUM_DELTA
+        string "DHT Humidity Delta (%)"
+        default "1.0"
+        help
+            Variation minimale d'humidité pour déclencher une publication (Format: float string).
+
+    config DHT_HEARTBEAT_MS
+        int "DHT Heartbeat Interval (ms)"
+        default 60000
+        help
+            Temps maximum (en ms) avant de forcer une publication, même sans variation de delta.
+
+endmenu

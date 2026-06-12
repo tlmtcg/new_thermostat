@@ -1,0 +1,13 @@
+idf_component_register(
+    SRCS 
+        "thermostat_task.c" 
+    INCLUDE_DIRS 
+        "include"
+    REQUIRES
+        dht
+        event_bus
+        heating_program
+        relay
+        sht31
+        utils
+)              

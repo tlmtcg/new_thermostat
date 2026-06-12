@@ -1,0 +1,78 @@
+menu "WiFi Manager Configuration"
+        comment "Parametres du reseau diffuse par l'ESP32"
+
+        config ESP_WIFI_STA_SSID
+            string "Station SSID"
+            default "freebox-TR2S"
+
+        config ESP_WIFI_STA_PASSWORD
+            string "Station password"
+            default "cordon-electronics_tr2s"
+
+        config ESP_WIFI_AP_SSID
+            string "AP SSID"
+            default "Thermostat"
+            help
+                Nom du WiFi emis par l'appareil pour la configuration initiale ou le secours.
+
+        config ESP_WIFI_AP_PASSWORD
+            string "AP password"
+            default "12345678"
+            help
+                Le mot de passe doit comporter au moins 8 caracteres.
+                Par defaut : 12345678.
+
+        config ESP_MAXIMUM_STA_RETRY
+            int "Nombre de tentatives de reconnexion"
+            range 1 100
+            default 5
+            help
+                Nombre de tentatives avant d'activer l'AP de secours.
+                Une valeur de 5 est un bon compromis stabilite/vitesse.
+
+        choice ESP_WIFI_SCAN_AUTH_MODE_THRESHOLD
+            prompt "Securite minimale acceptee"
+            default ESP_WIFI_AUTH_WPA2_PSK
+            help
+                Niveau de securite minimal pour autoriser la connexion. 
+                WPA2 PSK est la norme actuelle pour la plupart des box.
+
+            config ESP_WIFI_AUTH_OPEN
+                bool "Ouvert (Aucune)"
+            config ESP_WIFI_AUTH_WEP
+                bool "WEP (Obsolete)"
+            config ESP_WIFI_AUTH_WPA_PSK
+                bool "WPA PSK"
+            config ESP_WIFI_AUTH_WPA2_PSK
+                bool "WPA2 PSK"
+            config ESP_WIFI_AUTH_WPA_WPA2_PSK
+                bool "WPA/WPA2 PSK"
+            config ESP_WIFI_AUTH_WPA3_PSK
+                bool "WPA3 PSK"
+            config ESP_WIFI_AUTH_WPA2_WPA3_PSK
+                bool "WPA2/WPA3 PSK"
+        endchoice
+
+        config ESP_WIFI_RETRY_INTERVAL_MS
+            int "Intervalle entre retries (ms)"
+            range 500 10000
+            default 3000
+            help
+                Delai de "respiration" radio entre deux tentatives de connexion.
+                Augmenter cette valeur rend le SoftAP de secours plus visible.
+
+        config ESP_WIFI_AP_CHANNEL
+            int "AP channel"
+            range 1 13
+            default 1
+            help
+                Canal utilise par le SoftAP. Evitez les canaux encombres par votre box.
+
+        config ESP_MAX_STA_CONN_AP
+            int "Nombre max de clients sur l'AP"
+            range 1 10
+            default 4
+            help
+                Nombre maximum de téléphones ou PC connectés simultanément à l'ESP32.
+
+    endmenu
