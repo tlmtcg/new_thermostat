@@ -12,4 +12,5 @@ idf_component_register(
         dht
         thermostat_task
         wifi_app
+        time_manager
 )              

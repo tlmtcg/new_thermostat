@@ -41,6 +41,8 @@ typedef struct
     bool relay_on;
     bool wifi_connected;            // Ajout état connexion
     char wifi_ip[OLED_IP_STR_SIZE]; // Ajout stockage IP
+    bool dht_error;
+    bool wifi_error;
 } oled_local_data_t;
 
 static oled_local_data_t local_data = {
@@ -98,7 +100,13 @@ static void oled_rtos_task(void *pvParameters)
                 case EVENT_RELAY_SET:
                     local_data.relay_on = evt.net.bool_value;
                     break;
+                case EVENT_SENSOR_ERROR_DHT:
+                    local_data.dht_error = true;
+                    break;
                 case EVENT_WIFI_STATUS:
+                    local_data.wifi_connected = evt.net.bool_value;
+                    // Si pas connecté, on déclenche l'alerte
+                    local_data.wifi_error = !evt.net.bool_value;
                     local_data.wifi_connected = evt.net.bool_value;
                     if (local_data.wifi_connected && evt.payload.payload_ptr != NULL)
                     {
@@ -390,8 +398,25 @@ static void draw_weather_page(void)
 static void draw_alert_page(void)
 {
     draw_common_header("SYSTEM ALERTS");
-    ssd1306_draw_string(&oled_dev, 10, 30, "Pas d'alerte");
-    ssd1306_draw_string(&oled_dev, 10, 45, "Statut : Normal");
+
+    xSemaphoreTake(data_mutex, portMAX_DELAY);
+    bool has_dht_err = local_data.dht_error;
+    bool has_wifi_err = local_data.wifi_error;
+    xSemaphoreGive(data_mutex);
+
+    // Si aucune alerte
+    if (!has_dht_err && !has_wifi_err) {
+        ssd1306_draw_string(&oled_dev, 10, 30, "SYSTEME OK");
+        ssd1306_draw_string(&oled_dev, 10, 45, "Aucune alerte");
+    } else {
+        // Affichage des alertes actives
+        if (has_dht_err) {
+            ssd1306_draw_string(&oled_dev, 10, 25, "! ERREUR CAPTEUR");
+        }
+        if (has_wifi_err) {
+            ssd1306_draw_string(&oled_dev, 10, 40, "! ERREUR WIFI");
+        }
+    }
 }
 
 void oled_service_show_error(const char *msg)

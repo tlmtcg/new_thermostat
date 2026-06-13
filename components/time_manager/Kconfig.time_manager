@@ -1,0 +1,23 @@
+menu "Time Configuration"
+
+        config SNTP_SERVER_NAME
+            string "SNTP Server Name"
+            default "pool.ntp.org"
+            help
+                L'adresse du serveur NTP à utiliser pour la synchronisation.
+
+        config SNTP_WAIT_FOR_SYNC_MS
+            int "Wait for Sync Timeout (ms)"
+            default 2000
+            range 100 10000
+            help
+                Temps d'attente maximum en millisecondes pour une réponse du serveur.
+
+        config SNTP_MAX_RETRY
+            int "Max Retry Count"
+            default 10
+            range 1 50
+            help
+                Nombre maximal de tentatives de reconnexion en cas d'échec.
+
+    endmenu

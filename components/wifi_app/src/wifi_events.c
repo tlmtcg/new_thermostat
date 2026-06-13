@@ -5,6 +5,7 @@
 #include "esp_wifi.h"
 #include "esp_event.h"
 #include "esp_netif.h"
+#include "time_manager.h"
 
 static const char *TAG = "WIFI_EVENTS";
 static const wifi_callbacks_t *s_cb = NULL;
@@ -60,6 +61,9 @@ static void wifi_event_handler(void *arg, esp_event_base_t base, int32_t id, voi
         ESP_LOGI(TAG, "STA IP: " IPSTR, IP2STR(&ev->ip_info.ip));
 
         wifi_state_update(WIFI_STATE_STA_CONNECTED);
+
+        // Démarrage sécurisé du service temps ---
+        time_manager_start_sntp();
 
         // Ce callback transmet l'IP à wifi_app.c qui valide le statut sur l'Event Bus
         if (s_cb && s_cb->on_sta_connected)

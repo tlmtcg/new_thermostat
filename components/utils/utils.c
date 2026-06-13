@@ -33,3 +33,7 @@ char *format_json_alloc(const char *format, ...)
 
     return buf;
 }
+
+// Tableau de traduction des jours de la semaine
+const char * const JOURS_FR[] = {
+    "Dimanche", "Lundi", "Mardi", "Mercredi", "Jeudi", "Vendredi", "Samedi"};

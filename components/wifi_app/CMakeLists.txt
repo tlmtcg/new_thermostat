@@ -15,4 +15,5 @@ idf_component_register(
         esp_event
         freertos
         event_bus
+        time_manager
 )

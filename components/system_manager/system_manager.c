@@ -12,6 +12,8 @@
 #include "sensor_service.h"
 #include "thermostat_task.h"
 #include "wifi_app.h"
+#include "nvs_flash.h"
+#include "time_manager.h"
 
 static const char *TAG = "system_manager";
 
@@ -21,6 +23,20 @@ EventGroupHandle_t g_app_event_group = NULL;
 void system_manager_start(void)
 {
     ESP_LOGI(TAG, "System start");
+
+    // 0. Initialiser le NVS (indispensable)
+    esp_err_t ret = nvs_flash_init();
+    if (ret == ESP_ERR_NVS_NO_FREE_PAGES || ret == ESP_ERR_NVS_NEW_VERSION_FOUND) {
+        ESP_ERROR_CHECK(nvs_flash_erase());
+        ret = nvs_flash_init();
+    }
+    ESP_ERROR_CHECK(ret);
+
+    // Initialiser time_manager
+    if (time_manager_init() == ESP_OK) {
+        ESP_LOGI("MAIN", "Temps initialisé avec succès");
+    }
+
 
     // ---------------------------------------------------------------------
     // 1. BASE SYSTEM
@@ -67,6 +83,8 @@ void system_manager_start(void)
     // 4. OLED INIT (SANS TASK)
     // ---------------------------------------------------------------------
     ESP_LOGI(TAG, "Init OLED service");
+
+    vTaskDelay(pdMS_TO_TICKS(500)); // Laisse 500ms de plus après le scan
 
     err = oled_service_init(i2c_bus_handle);
     if (err != ESP_OK)
@@ -134,98 +152,59 @@ void system_manager_start(void)
 // {
 //     ESP_LOGI(TAG, "System start");
 
-//     // ---------------------------------------------------------------------
-//     // 1. BASE SYSTEM
-//     // ---------------------------------------------------------------------
+//     // 0. Initialisation mémoire et NVS
+//     esp_err_t ret = nvs_flash_init();
+//     if (ret == ESP_ERR_NVS_NO_FREE_PAGES || ret == ESP_ERR_NVS_NEW_VERSION_FOUND) {
+//         ESP_ERROR_CHECK(nvs_flash_erase());
+//         ret = nvs_flash_init();
+//     }
+//     ESP_ERROR_CHECK(ret);
+
+//     // Initialisation locale du gestionnaire de temps (sans accès réseau immédiat)
+//     if (time_manager_init() == ESP_OK) {
+//         ESP_LOGI("MAIN", "Temps initialisé avec succès");
+//     }
+
+//     // 1. Initialisation des bus et événements
 //     event_bus_init();
 //     relay_init();
-
 //     g_app_event_group = xEventGroupCreate();
-//     if (!g_app_event_group)
-//     {
-//         ESP_LOGE(TAG, "Failed to create system EventGroup");
-//         return;
-//     }
-
-//     // IMPORTANT : mutex I2C AVANT tout accès bus
 //     i2c_mutex_init();
 
-//     // ---------------------------------------------------------------------
-//     // 2. I2C BUS INIT
-//     // ---------------------------------------------------------------------
+//     // 2. Initialisation I2C et scan
 //     esp_err_t err = hardware_i2c_init();
-//     if (err != ESP_OK)
-//     {
-//         ESP_LOGE(TAG, "I2C init failed: %s", esp_err_to_name(err));
+//     if (err != ESP_OK) {
+//         ESP_LOGE(TAG, "I2C init failed");
 //         return;
 //     }
-
 //     vTaskDelay(pdMS_TO_TICKS(50));
-
 //     i2c_bus_scan(i2c_bus_handle);
 
-//     // ---------------------------------------------------------------------
-//     // 3. SENSOR INIT (SANS TASK)
-//     // ---------------------------------------------------------------------
-//     ESP_LOGI(TAG, "Init sensor service");
+//     // 3. Initialisation des drivers (SANS lancer les tâches complexes encore)
+//     sensor_service_init(i2c_bus_handle);
+//     oled_service_init(i2c_bus_handle);
 
-//     err = sensor_service_init(i2c_bus_handle);
-//     if (err != ESP_OK)
-//     {
-//         ESP_LOGE(TAG, "Sensor init failed: %s", esp_err_to_name(err));
-//     }
-
-//     // ---------------------------------------------------------------------
-//     // 4. OLED INIT (SANS TASK)
-//     // ---------------------------------------------------------------------
-//     ESP_LOGI(TAG, "Init OLED service");
-
-//     err = oled_service_init(i2c_bus_handle);
-//     if (err != ESP_OK)
-//     {
-//         ESP_LOGE(TAG, "OLED init failed: %s", esp_err_to_name(err));
-//     }
-
-//     // ---------------------------------------------------------------------
-//     // 5. START TASK SYSTEM (UNIQUEMENT RTOS)
-//     // ---------------------------------------------------------------------
-//     tasks_start();
-
-//     vTaskDelay(pdMS_TO_TICKS(50));
-
-//     // ---------------------------------------------------------------------
-//     // 6. START SERVICES (MAINTENANT QUE TOUT EST STABLE)
-//     // ---------------------------------------------------------------------
-
-//     ESP_LOGI(TAG, "Starting sensor service");
-
-//     err = sensor_service_start(i2c_bus_handle);
-//     if (err != ESP_OK)
-//     {
-//         ESP_LOGE(TAG, "Sensor start failed: %s", esp_err_to_name(err));
-//     }
-
-//     vTaskDelay(pdMS_TO_TICKS(50));
-
+//     // 4. Démarrage prioritaire de l'OLED (pour feedback utilisateur immédiat)
 //     oled_task_config_t oled_config = {
 //         .event_group = g_app_event_group,
 //         .event_bit = BIT(0),
 //         .refresh_interval_ms = 500
 //     };
-
 //     ESP_LOGI(TAG, "Starting OLED service");
+//     oled_service_start(&oled_config);
 
-//     err = oled_service_start(&oled_config);
-//     if (err != ESP_OK)
-//     {
-//         ESP_LOGE(TAG, "OLED start failed: %s", esp_err_to_name(err));
-//     }
+//     // 5. Initialisation des services restants
+//     thermostat_init();
+//     tasks_start(); // Thermostat et logique métier
 
-//     // ---------------------------------------------------------------------
-//     // 7. ACTIVATE SYSTEM
-//     // ---------------------------------------------------------------------
+//     // 6. Lancement final : WiFi et Capteurs
+//     // Le WiFi démarrera, et dans son handler (IP_EVENT_STA_GOT_IP), 
+//     // il déclenchera time_manager_start_sntp() via l'event bus ou appel direct.
+//     wifi_app_start();
+
+//     sensor_service_start(i2c_bus_handle);
+
+//     // 7. Signalisation "System Ready"
 //     xEventGroupSetBits(g_app_event_group, BIT(0));
-
 //     ESP_LOGI(TAG, "System ready");
 // }
-

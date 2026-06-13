@@ -5,5 +5,6 @@
 
 uint32_t get_ms(void);
 char *format_json_alloc(const char *format, ...);
+extern const char * const JOURS_FR[];
 
 #endif
