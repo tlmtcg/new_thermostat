@@ -7,6 +7,7 @@
 #include <math.h>
 #include "utils.h"
 #include "freertos/semphr.h"
+#include "event_bus.h"
 
 static const char *TAG = "TIME_MANAGER";
 
@@ -53,6 +54,13 @@ static void time_sync_notification_cb(struct timeval *tv)
     {
         ESP_LOGI(TAG, "Synchronisation SNTP réussie");
     }
+
+    // Notification système
+    event_t evt;
+    evt.type = EVENT_NET_TIME_SYNCED;
+    event_bus_publish(&evt);
+    
+    ESP_LOGI(TAG, "Notification de synchronisation envoyée.");
 }
 
 /* -------------------------------------------------------------------------- */
@@ -230,6 +238,10 @@ void time_manager_start_sntp(void)
 
     esp_sntp_setoperatingmode(SNTP_OPMODE_POLL);
     esp_sntp_setservername(0, cfg.ntp_server);
+
+    // Demande à l'ESP de se resynchroniser périodiquement
+    esp_sntp_set_sync_mode(SNTP_SYNC_MODE_IMMED);
+
     sntp_set_time_sync_notification_cb(time_sync_notification_cb);
     esp_sntp_init();
 
@@ -238,4 +250,13 @@ void time_manager_start_sntp(void)
     
     // Note : Ne pas faire de boucle d'attente bloquante ici. 
     // Le callback 'time_sync_notification_cb' gérera la suite.
+}
+
+struct tm time_utils_get_local_time(void)
+{
+    time_t now;
+    struct tm info;
+    time(&now);
+    localtime_r(&now, &info);
+    return info;
 }

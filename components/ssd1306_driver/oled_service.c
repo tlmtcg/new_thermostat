@@ -3,7 +3,7 @@
  * @file oled_service.c
  * @brief Gestionnaire de haut niveau et orchestrateur des pages de l'écran OLED connecté à l'Event Bus.
  */
-
+#define LOG_LOCAL_LEVEL ESP_LOG_DEBUG
 #include "oled_service.h"
 #include "ssd1306_driver.h"
 #include "esp_log.h"
@@ -73,10 +73,11 @@ static void draw_wifi_page(void);
  */
 static void oled_rtos_task(void *pvParameters)
 {
+    ESP_LOGI(TAG, "Tâche OLED démarrée et en attente du signal..."); // AJOUTE CECI
     const oled_task_config_t *cfg = (const oled_task_config_t *)pvParameters;
     event_t evt;
 
-    xEventGroupWaitBits(cfg->event_group, cfg->event_bit, pdFALSE, pdTRUE, portMAX_DELAY);
+    // xEventGroupWaitBits(cfg->event_group, cfg->event_bit, pdFALSE, pdTRUE, portMAX_DELAY);
     uint32_t page_tick_counter = 0;
 
     while (1)
@@ -192,6 +193,9 @@ esp_err_t oled_service_init(i2c_master_bus_handle_t bus)
     esp_err_t err = ssd1306_init(&oled_dev, bus, 0x3C);
     if (err == ESP_OK)
     {
+        // Commande 0xAF = Display ON
+        // Utilise la fonction de commande brute de ton driver
+        ssd1306_display_on(&oled_dev);
         memset(&graph_data, 0, sizeof(graph_data));
 
         // S'ABONNER AUX FLUX DE L'EVENT BUS
@@ -405,15 +409,20 @@ static void draw_alert_page(void)
     xSemaphoreGive(data_mutex);
 
     // Si aucune alerte
-    if (!has_dht_err && !has_wifi_err) {
+    if (!has_dht_err && !has_wifi_err)
+    {
         ssd1306_draw_string(&oled_dev, 10, 30, "SYSTEME OK");
         ssd1306_draw_string(&oled_dev, 10, 45, "Aucune alerte");
-    } else {
+    }
+    else
+    {
         // Affichage des alertes actives
-        if (has_dht_err) {
+        if (has_dht_err)
+        {
             ssd1306_draw_string(&oled_dev, 10, 25, "! ERREUR CAPTEUR");
         }
-        if (has_wifi_err) {
+        if (has_wifi_err)
+        {
             ssd1306_draw_string(&oled_dev, 10, 40, "! ERREUR WIFI");
         }
     }

@@ -32,3 +32,4 @@ void ssd1306_draw_pixel(ssd1306_t *lcd, uint8_t x, uint8_t y, bool color);
 void ssd1306_draw_line(ssd1306_t *lcd, uint8_t x1, uint8_t y1, uint8_t x2, uint8_t y2, bool color);
 void ssd1306_draw_string(ssd1306_t *lcd, uint8_t x, uint8_t y, const char *str);
 void ssd1306_clear(ssd1306_t *lcd);
+void ssd1306_display_on(ssd1306_t *dev);

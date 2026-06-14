@@ -14,18 +14,16 @@
 
 static const char *TAG = "SSD1306_DRV";
 
-#define SSD1306_CONTROL_CMD   0x00
-#define SSD1306_CONTROL_DATA  0x40
+#define SSD1306_CONTROL_CMD 0x00
+#define SSD1306_CONTROL_DATA 0x40
 
 // buffer vidéo 128x64
 static uint8_t video_buffer[SSD1306_BUFFER_SIZE];
-
 
 // =======================================================
 // FORWARD DECL (IMPORTANT => FIX implicit declaration)
 // =======================================================
 static void ssd1306_draw_char(ssd1306_t *lcd, uint8_t x, uint8_t y, char c);
-
 
 // =======================================================
 // LOW LEVEL I2C CMD (NO MUTEX HERE)
@@ -35,11 +33,10 @@ esp_err_t ssd1306_write_cmd(ssd1306_t *lcd, uint8_t cmd)
     if (!lcd || !lcd->i2c_dev)
         return ESP_ERR_INVALID_STATE;
 
-    uint8_t tx[2] = { SSD1306_CONTROL_CMD, cmd };
+    uint8_t tx[2] = {SSD1306_CONTROL_CMD, cmd};
 
     return i2c_master_transmit(lcd->i2c_dev, tx, 2, 100);
 }
-
 
 // =======================================================
 // INIT DEVICE
@@ -63,8 +60,8 @@ esp_err_t ssd1306_reinit(ssd1306_t *lcd,
 
     i2c_device_config_t cfg = {
         .dev_addr_length = I2C_ADDR_BIT_LEN_7,
-        .device_address  = address,
-        .scl_speed_hz    = 100000,
+        .device_address = address,
+        .scl_speed_hz = 100000,
     };
 
     esp_err_t err = i2c_master_bus_add_device(bus, &cfg, &lcd->i2c_dev);
@@ -79,9 +76,12 @@ esp_err_t ssd1306_reinit(ssd1306_t *lcd,
     vTaskDelay(pdMS_TO_TICKS(50));
 
     // init minimal (tu peux remettre ta séquence complète ensuite)
-    if ((err = ssd1306_write_cmd(lcd, 0xAE)) != ESP_OK) goto fail;
-    if ((err = ssd1306_write_cmd(lcd, 0xA6)) != ESP_OK) goto fail;
-    if ((err = ssd1306_write_cmd(lcd, 0xAF)) != ESP_OK) goto fail;
+    if ((err = ssd1306_write_cmd(lcd, 0xAE)) != ESP_OK)
+        goto fail;
+    if ((err = ssd1306_write_cmd(lcd, 0xA6)) != ESP_OK)
+        goto fail;
+    if ((err = ssd1306_write_cmd(lcd, 0xAF)) != ESP_OK)
+        goto fail;
 
     lcd->initialized = true;
 
@@ -92,7 +92,6 @@ fail:
     xSemaphoreGive(g_i2c_mutex);
     return err;
 }
-
 
 // =======================================================
 // INIT PUBLIC
@@ -115,7 +114,6 @@ esp_err_t ssd1306_init(ssd1306_t *lcd,
     return ssd1306_reinit(lcd, bus, address);
 }
 
-
 // =======================================================
 // CLEAR
 // =======================================================
@@ -126,7 +124,6 @@ void ssd1306_clear(ssd1306_t *lcd)
 
     memset(lcd->buffer, 0, SSD1306_BUFFER_SIZE);
 }
-
 
 // =======================================================
 // UPDATE DISPLAY
@@ -162,7 +159,6 @@ esp_err_t ssd1306_update(ssd1306_t *lcd)
     return err;
 }
 
-
 // =======================================================
 // PIXEL DRAW
 // =======================================================
@@ -184,7 +180,6 @@ void ssd1306_draw_pixel(ssd1306_t *lcd,
     else
         lcd->buffer[index] &= ~(1 << (y % 8));
 }
-
 
 // =======================================================
 // LINE DRAW (BRESENHAM)
@@ -214,11 +209,18 @@ void ssd1306_draw_line(ssd1306_t *lcd,
 
         int e2 = 2 * err;
 
-        if (e2 >= dy) { err += dy; x1 += sx; }
-        if (e2 <= dx) { err += dx; y1 += sy; }
+        if (e2 >= dy)
+        {
+            err += dy;
+            x1 += sx;
+        }
+        if (e2 <= dx)
+        {
+            err += dx;
+            y1 += sy;
+        }
     }
 }
-
 
 // =======================================================
 // DRAW CHAR (FONT 5x7)
@@ -250,7 +252,6 @@ static void ssd1306_draw_char(ssd1306_t *lcd,
     }
 }
 
-
 // =======================================================
 // DRAW STRING
 // =======================================================
@@ -269,4 +270,20 @@ void ssd1306_draw_string(ssd1306_t *lcd,
         ssd1306_draw_char(lcd, x, y, *str++);
         x += step;
     }
+}
+
+void ssd1306_display_on(ssd1306_t *dev)
+{
+    // Envoie la commande 0xAF (Display ON)
+    // Utilise la fonction interne de ton driver pour écrire une commande
+    // (Cherche dans le .c comment ssd1306_clear écrit sur le bus,
+    // c'est souvent une fonction interne comme 'ssd1306_write_command')
+    extern void ssd1306_write_command(ssd1306_t * dev, uint8_t command); // Déclaration interne
+    ssd1306_write_cmd(dev, 0xAF);
+    // 0x8D: Charge pump, 0x14: Enable, 0xAF: ON
+    ssd1306_write_cmd(dev, 0x8D);
+    ssd1306_write_cmd(dev, 0x14);
+    ssd1306_write_cmd(dev, 0xAF);
+    ssd1306_write_cmd(dev, 0xC8);
+    ssd1306_write_cmd(dev,0xA1 );
 }

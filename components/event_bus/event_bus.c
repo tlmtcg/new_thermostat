@@ -174,7 +174,7 @@ void event_bus_get_stats(event_bus_stats_t *out)
     if (!out || !bus_mutex)
         return;
 
-    if (xSemaphoreTakeRecursive(bus_mutex, portMAX_DELAY) == pdTRUE)
+    if (xSemaphoreTakeRecursive(bus_mutex, pdMS_TO_TICKS(10)) == pdTRUE)
     {
         *out = stats;
         xSemaphoreGiveRecursive(bus_mutex);

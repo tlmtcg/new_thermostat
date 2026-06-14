@@ -9,6 +9,8 @@
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
 #include <math.h>
+#include "heating_program.h"
+#include "utils.h"
 
 static const char *TAG = "THERMOSTAT";
 
@@ -21,6 +23,7 @@ static bool dht_valid = false;
 static bool sht31_valid = false;
 static float last_known_exterior_temp = 10.0f; 
 static bool last_relay_state = false;
+static heating_mode_t current_mode = HEATING_MODE_ABSENT;
 
 /* =========================================================================
  * 1. SOUS-COMPOSANT : ARBITRAGE DES CAPTEURS
@@ -46,29 +49,64 @@ static void perform_thermal_regulation(float current_temp, const char *source)
 {
     const float consigne = heating_calculate_target_temperature(last_known_exterior_temp);
     const float hysteresis = 0.2f;
+
+    const float low_threshold  = consigne - hysteresis;
+    const float high_threshold = consigne + hysteresis;
+
     bool target_state = last_relay_state;
 
     if (consigne != current_calculated_target) {
         current_calculated_target = consigne;
-        event_t tx_consigne = { .type = EVENT_THERMOSTAT_SET, .sensor.temperature = consigne };
+
+        event_t tx_consigne = {
+            .type = EVENT_THERMOSTAT_SET,
+            .sensor.temperature = consigne
+        };
         event_bus_publish(&tx_consigne);
     }
 
-    if (current_temp < (consigne - hysteresis)) {
+    if (current_temp < low_threshold) {
         target_state = true;
-    } else if (current_temp > (consigne + hysteresis)) {
+    } else if (current_temp > high_threshold) {
         target_state = false;
     }
 
+    float delta = consigne - current_temp;
+
+    ESP_LOGI(TAG,
+             "[THERMO] src=%s mode=%s temp=%.2f°C consigne=%.2f°C "
+             "delta=%+.2f°C hyst=±%.2f°C "
+             "seuils=[%.2f / %.2f] relais=%s -> cible=%s",
+             source,
+             heating_mode_to_string(current_mode),
+             current_temp,
+             consigne,
+             delta,
+             hysteresis,
+             low_threshold,
+             high_threshold,
+             last_relay_state ? "ON" : "OFF",
+             target_state ? "ON" : "OFF");
+
     if (target_state != last_relay_state) {
-        ESP_LOGI(TAG, "CHANGEMENT D'ÉTAT via %s => Température %.1f Consigne %.1f -> Relais %s",
-                 source, current_temp, consigne, target_state ? "ON" : "OFF");
+
+        ESP_LOGI(TAG,
+                 "[THERMO] CHANGEMENT ETAT src=%s "
+                 "temp=%.2f°C consigne=%.2f°C delta=%+.2f°C "
+                 "relais %s -> %s",
+                 source,
+                 current_temp,
+                 consigne,
+                 delta,
+                 last_relay_state ? "ON" : "OFF",
+                 target_state ? "ON" : "OFF");
 
         event_t response_evt = {
             .type = EVENT_RELAY_SET,
             .priority = EVENT_PRIO_NORMAL,
             .net.bool_value = target_state
         };
+
         event_bus_publish(&response_evt);
         last_relay_state = target_state;
     }

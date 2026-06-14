@@ -37,3 +37,26 @@ char *format_json_alloc(const char *format, ...)
 // Tableau de traduction des jours de la semaine
 const char * const JOURS_FR[] = {
     "Dimanche", "Lundi", "Mardi", "Mercredi", "Jeudi", "Vendredi", "Samedi"};
+
+#include "heating_program.h"
+
+const char *heating_mode_to_string(heating_mode_t mode)
+{
+    switch (mode)
+    {
+        case HEATING_MODE_AUTO:
+            return "AUTO";
+
+        case HEATING_MODE_MANUAL:
+            return "MANUAL";
+
+        case HEATING_MODE_ABSENT:
+            return "ABSENT";
+
+        case HEATING_MODE_HORS_GEL:
+            return "HORS GEL";
+
+        default:
+            return "UNKNOWN";
+    }
+}

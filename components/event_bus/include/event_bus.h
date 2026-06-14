@@ -24,6 +24,7 @@ extern "C"
 
         // Thermostat et relais
         EVENT_THERMOSTAT_SET,
+        EVENT_THERMOSTAT_MODE,
         EVENT_RELAY_SET,
 
         // Météo
@@ -36,6 +37,7 @@ extern "C"
         // NETWORK & TIME
         EVENT_WIFI_STATUS,
         EVENT_NET_TIME_SYNCED,
+        EVENT_NET_TIME_ERROR,
 
         // STORAGE & FTP
         EVENT_SD_CRITICAL_ERROR,
@@ -56,21 +58,6 @@ extern "C"
     } event_priority_t;
 
     // ===================== EVENT =====================
-
-    // typedef struct
-    // {
-    //     event_type_t type;
-    //     event_priority_t priority;
-
-    //     float temperature;
-    //     float humidity;
-
-    //     bool bool_value;
-    //     int error_code;
-    //     uint8_t retry_count;
-
-    //     uint32_t timestamp_ms;
-    // } event_t;
 
     typedef struct
     {
