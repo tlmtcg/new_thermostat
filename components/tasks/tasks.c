@@ -9,6 +9,7 @@
 #include "sht31_task.h"
 #include "weather_task.h"
 #include <math.h>
+#include "serial_manager.h"
 #include "weather_store.h" 
 
 // Variables de configuration (à lier ou déclarer selon votre architecture globale)
@@ -37,7 +38,9 @@ void tasks_start(void)
         {dht_task, "dht_task", CONFIG_DHT_STACK_SIZE, NULL, CONFIG_DHT_TASK_PRIORITY},
         {relay_task, "relay_task", CONFIG_RELAY_STACK_SIZE, NULL, CONFIG_RELAY_TASK_PRIORITY},
         {sht31_task, "sht31_task", CONFIG_SHT31_STACK_SIZE, &sht31_config, CONFIG_SHT31_TASK_PRIORITY},
-        {weather_update_task, "weather_task", 10240, &weather_config, 4}};
+        {weather_update_task, "weather_task", 10240, &weather_config, 4},
+        {serial_task, "serial_task", 4096, NULL, 4},
+    };
 
     // Lancement de toutes les tâches de la liste
     for (size_t i = 0; i < sizeof(task_list) / sizeof(task_list[0]); i++)

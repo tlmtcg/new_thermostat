@@ -6,5 +6,6 @@ idf_component_register(
     REQUIRES
         dht
         thermostat_task
-           sht31
+        serial_manager
+        sht31
 )              

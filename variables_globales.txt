@@ -1,0 +1,145 @@
+Voici toutes les variables globales du projet Blink organisées par catégorie:
+
+📊 VARIABLES GLOBALES - PROJET BLINK
+🔌 I2C & Mutex (Bus Partagé)
+g_i2c_mutex - Sémaphore pour protéger l'accès I2C
+i2c_bus_handle - Handle du bus I2C principal
+🌍 Event Bus
+g_app_event_group - Groupe d'événements global de l'app
+subscribers[] - Tableau des souscripteurs (max 64)
+subscriber_count - Nombre actuel de souscripteurs
+stats - Statistiques du bus d'événements
+bus_mutex - Mutex de protection du bus
+📡 WiFi
+g_wifi_cfg - Configuration WiFi stockée
+s_wifi_event_group - Groupe d'événements WiFi
+s_wifi_retry_timer - Timer de reconnexion WiFi
+s_retry_num - Compteur de tentatives
+s_sta_connected - État de connexion STA
+s_ap_clients - Nombre de clients AP
+s_state - État de la machine d'état WiFi
+s_test_mode - Mode test WiFi
+s_ap_clients_count - Compteur clients AP
+xReconnectTimer - Timer de reconnexion
+🌡️ Capteurs Température/Humidité (SHT31)
+g_sht31 - Contexte SHT31
+g_sht31_config - Configuration SHT31
+g_sht31_runtime - Données runtime SHT31
+sht31_bus - Bus I2C SHT31
+sht31_addr - Adresse I2C SHT31
+last_published_temp - Dernière température publiée
+last_published_hum - Dernière humidité publiée
+last_publish_ms - Timestamp dernier publish
+last_log_time - Temps du dernier log
+💨 Capteurs DHT
+active_config - Configuration DHT active
+active_runtime - Runtime DHT actif
+dht_temperature - Température DHT courante
+last_published_temp - Dernière temp DHT publiée
+last_published_hum - Dernière humidité DHT publiée
+last_publish_ms - Timestamp DHT
+consecutive_errors - Compteur d'erreurs consécutives
+🔥 Relais Chauffage
+g_relay_config - Configuration relais
+g_relay_runtime - Runtime du relais
+🌡️ Thermostat
+current_calculated_target - Température cible calculée (19.0°C)
+thermostat_queue - Queue des commandes thermostat
+dht_temperature - Température DHT actuelle
+sht31_temperature - Température SHT31 actuelle
+dht_valid - Validité données DHT
+sht31_valid - Validité données SHT31
+last_known_exterior_temp - Dernière temp extérieure (10.0°C)
+last_relay_state - Dernier état du relais
+📺 Écran OLED
+video_buffer[] - Buffer vidéo (SSD1306)
+oled_dev - Structure périphérique OLED
+current_page - Page OLED actuelle
+graph_data - Données du graphique OLED
+oled_task_handle - Handle de la tâche OLED
+oled_queue - Queue des commandes OLED
+data_mutex - Mutex données OLED
+local_data - Données locales OLED
+SSD1306_FONT_5X7 - Police OLED 5x7
+📋 LED & Test
+s_led_state - État LED (blink_test.c)
+led_strip - Handle bande LED
+🎯 Programme Chauffage
+config - Configuration programme chauffage
+mock_time - Structure temps (pour mock)
+sht31_config - Config SHT31 global
+sht31_default_delay - Délai SHT31 (5000ms)
+g_sensor_running - État du service capteur
+🔤 Polices & Ressources
+font5x7[][] - Tableau de polices 5x7
+Les variables marquées avec extern sont déclarées globalement mais initialisées dans d'autres fichiers. Les variables static sont locales au fichier.
+
+Doublons
+Dans sht31_task.c et dans dht_task.c:
+
+static float last_published_temp = NAN;
+static float last_published_hum = NAN;
+static uint32_t last_publish_ms = 0;
+
+Dans thermostat_task.c,
+static float dht_temperature = NAN;
+static float sht31_temperature = NAN;
+static bool dht_valid = false;
+static bool sht31_valid = false;
+
+VARIABLES D'ÉTAT PARTAGÉ
+Variable	Où	Remplacer par
+s_wifi_event_group	wifi_manager.c	EVENT_WIFI_STATUS
+s_state (WiFi)	wifi_state_machine.c	EVENT_WIFI_STATUS
+s_sta_connected	wifi_manager.c	EVENT_WIFI_STATUS
+s_retry_num	wifi_manager.c	Interne (local OK)
+s_ap_clients	wifi_manager.c	EVENT_WIFI_STATUS
+last_relay_state	thermostat_task.c	EVENT_RELAY_SET
+current_calculated_target	thermostat_task.c	EVENT_THERMOSTAT_SET
+
+HANDLES & RESSOURCES (À GARDER GLOBALES)
+Ces variables DOIVENT rester globales (pas d'événement pour ça):
+// ✅ GARDER globales (ressources bas-niveau):
+g_i2c_mutex              // Mutex physique
+i2c_bus_handle           // Handle I2C hardware
+g_app_event_group        // EventGroup FreeRTOS
+bus_mutex                // Mutex event_bus
+oled_queue              // Queue OLED
+thermostat_queue        // Queue thermostat
+video_buffer[]          // Buffer VRAM
+
+// Ajouter dans event_bus.h les événements manquants:
+typedef enum {
+    EVENT_SENSOR_LAST_PUBLISHED,  // Cache du dernier publish
+    EVENT_RELAY_STATE_CHANGED,    // État relais change
+    EVENT_THERMOSTAT_TARGET_CHANGED  // Consigne change
+} event_type_t;
+
+// Dans dht_task.c & sht31_task.c:
+// ✗ Supprimer: static float last_published_temp
+// ✓ Remplacer par: event_bus_publish(EVENT_SENSOR_LAST_PUBLISHED)
+
+// OLED s'abonne aux capteurs DIRECTEMENT
+event_type_t oled_filter[] = {
+    EVENT_SENSOR_DHT,
+    EVENT_SENSOR_SHT31,
+    EVENT_RELAY_SET,
+    EVENT_THERMOSTAT_SET
+};
+oled_queue = event_bus_subscribe("oled", oled_filter, 4);
+// Puis lit depuis la queue, PAS de variable globale
+
+// Avant (❌ 8 variables globales):
+static float dht_temperature;
+static float sht31_temperature;
+static bool dht_valid;
+static bool sht31_valid;
+static float current_calculated_target;
+static bool last_relay_state;
+static float last_known_exterior_temp;
+
+// Après (✓ 0 variables, tout via events):
+// - Recevoir EVENT_SENSOR_DHT/SHT31 → traiter directement
+// - Recevoir EVENT_WEATHER_UPDATE → utiliser directement
+// - Publier EVENT_RELAY_SET quand change
+// - Publier EVENT_THERMOSTAT_SET (consigne)

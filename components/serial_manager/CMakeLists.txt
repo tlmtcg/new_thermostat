@@ -11,5 +11,5 @@ idf_component_register(
         freertos
         relay
         sht31
-        thermostat
+        thermostat_task
 )

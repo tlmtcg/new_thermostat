@@ -15,7 +15,8 @@
 #include "freertos/task.h"
 #include "relay.h"
 #include "sht31.h"
-#include "thermostat.h"
+#include "thermostat_task.h"
+#include "heating_program.h"
 
 static const char *TAG = "SERIAL_MGR";
 
@@ -142,48 +143,103 @@ static esp_err_t apply_relay_json(const char *json)
     return relay_set_config(&config);
 }
 
-static esp_err_t apply_thermostat_json(const char *json)
-{
-    cJSON *root = cJSON_Parse(json);
-    if (!root)
+/**
+ * @brief Applique une configuration de thermostat depuis un JSON.
+ * @param json Chaîne JSON contenant la configuration.
+ * @return ESP_OK en cas de succès, une erreur sinon.
+ */
+esp_err_t apply_thermostat_json(const char *json) {
+    if (json == NULL) {
+        ESP_LOGE(TAG, "JSON NULL");
         return ESP_ERR_INVALID_ARG;
+    }
 
+    // Parse le JSON
+    cJSON *root = cJSON_Parse(json);
+    if (root == NULL) {
+        ESP_LOGE(TAG, "Échec du parsing JSON");
+        return ESP_ERR_INVALID_ARG;
+    }
+
+    // Récupère la configuration actuelle
     thermostat_config_t config;
     esp_err_t err = thermostat_get_config(&config);
-    if (err != ESP_OK)
-    {
+    if (err != ESP_OK) {
+        ESP_LOGE(TAG, "Échec de la lecture de la config: %s", esp_err_to_name(err));
         cJSON_Delete(root);
         return err;
     }
 
+    // --- 1. Champ "enabled" ---
     cJSON *enabled = cJSON_GetObjectItem(root, "enabled");
-    if (cJSON_IsBool(enabled))
+    if (cJSON_IsBool(enabled)) {
         config.enabled = cJSON_IsTrue(enabled);
+    }
 
+    // --- 2. Champ "consigne" ou "target_temp" ---
     cJSON *consigne = cJSON_GetObjectItem(root, "consigne");
-    if (!consigne)
-        consigne = cJSON_GetObjectItem(root, "target");
-    if (cJSON_IsNumber(consigne))
+    if (!consigne) {
+        consigne = cJSON_GetObjectItem(root, "target_temp");  // Alternative
+    }
+    if (cJSON_IsNumber(consigne)) {
         config.consigne = (float)consigne->valuedouble;
+    }
 
+    // --- 3. Champ "mode" ---
     cJSON *mode = cJSON_GetObjectItem(root, "mode");
-    if (cJSON_IsNumber(mode))
-        config.mode = (thermostat_mode_t)mode->valueint;
+    if (cJSON_IsString(mode)) {
+        // Convertit la chaîne en enum (ex: "AUTO" → HEATING_MODE_AUTO)
+        if (strcmp(mode->valuestring, "AUTO") == 0) {
+            config.mode = HEATING_MODE_AUTO;
+        } else if (strcmp(mode->valuestring, "MANU") == 0) {
+            config.mode = HEATING_MODE_MANUAL;
+        } else if (strcmp(mode->valuestring, "ABSENT") == 0) {
+            config.mode = HEATING_MODE_ABSENT;
+        } else if (strcmp(mode->valuestring, "H-GEL") == 0) {
+            config.mode = HEATING_MODE_HORS_GEL;
+        }
+    } else if (cJSON_IsNumber(mode)) {
+        // Si le mode est un nombre (ex: 0, 1, 2...)
+        config.mode = (heating_mode_t)mode->valueint;
+    }
 
+    // --- 4. Champ "hysteresis" ---
     cJSON *hysteresis = cJSON_GetObjectItem(root, "hysteresis");
-    if (cJSON_IsNumber(hysteresis))
+    if (cJSON_IsNumber(hysteresis)) {
         config.hysteresis = (float)hysteresis->valuedouble;
+    }
 
+    // --- 5. Champ "calibration" ---
     cJSON *calibration = cJSON_GetObjectItem(root, "calibration");
-    if (cJSON_IsNumber(calibration))
+    if (cJSON_IsNumber(calibration)) {
         config.calibration = (float)calibration->valuedouble;
+    }
 
+    // --- 6. Champ "frost_mode" ---
     cJSON *frost_mode = cJSON_GetObjectItem(root, "frost_mode");
-    if (cJSON_IsBool(frost_mode))
+    if (cJSON_IsBool(frost_mode)) {
         config.frost_mode = cJSON_IsTrue(frost_mode);
+    }
+
+    // --- 7. Champ "temp_source" (optionnel) ---
+    cJSON *temp_source = cJSON_GetObjectItem(root, "temp_source");
+    if (cJSON_IsString(temp_source)) {
+        // Si tu veux forcer une source de température (ex: "SHT31" ou "DHT")
+        if (strcmp(temp_source->valuestring, "SHT31") == 0) {
+            temperature_set_source(TEMP_SOURCE_SHT31);
+        } else if (strcmp(temp_source->valuestring, "DHT") == 0) {
+            temperature_set_source(TEMP_SOURCE_DHT);
+        }
+    }
+
+    // --- 8. Applique la nouvelle configuration ---
+    err = thermostat_set_config(&config);
+    if (err != ESP_OK) {
+        ESP_LOGE(TAG, "Échec de l'application de la config: %s", esp_err_to_name(err));
+    }
 
     cJSON_Delete(root);
-    return thermostat_set_config(&config);
+    return err;
 }
 
 static esp_err_t apply_sht31_json(const char *json)
@@ -207,10 +263,6 @@ static esp_err_t apply_sht31_json(const char *json)
     cJSON *read_interval_ms = cJSON_GetObjectItem(root, "read_interval_ms");
     if (cJSON_IsNumber(read_interval_ms))
         config.read_interval_ms = (uint32_t)read_interval_ms->valuedouble;
-
-    cJSON *log_to_sd = cJSON_GetObjectItem(root, "log_to_sd");
-    if (cJSON_IsBool(log_to_sd))
-        config.log_to_sd = cJSON_IsTrue(log_to_sd);
 
     cJSON_Delete(root);
     return sht31_set_config(&config);
@@ -290,6 +342,26 @@ void handle_command(const char *cmd)
 
 void serial_task(void *arg)
 {
+    ESP_LOGI(TAG, "serial_task started");
+
+    uart_config_t cfg = {
+        .baud_rate = 115200,
+        .data_bits = UART_DATA_8_BITS,
+        .parity = UART_PARITY_DISABLE,
+        .stop_bits = UART_STOP_BITS_1,
+        .flow_ctrl = UART_HW_FLOWCTRL_DISABLE,
+        .source_clk = UART_SCLK_DEFAULT,
+    };
+
+    ESP_ERROR_CHECK(uart_param_config(SERIAL_UART, &cfg));
+    ESP_ERROR_CHECK(uart_driver_install(
+        SERIAL_UART,
+        SERIAL_BUF_SIZE * 2,
+        0,
+        0,
+        NULL,
+        0));
+        
     uint8_t c;
     char line[SERIAL_BUF_SIZE];
     int pos = 0;
