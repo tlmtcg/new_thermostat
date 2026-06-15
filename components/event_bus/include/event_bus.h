@@ -29,6 +29,7 @@ extern "C"
 
         // Météo
         EVENT_WEATHER_UPDATE,
+        EVENT_WEATHER_HOURLY,
 
         // WEB SERVER & SERIAL
         EVENT_MODE_CHANGE_REQUEST,
@@ -88,6 +89,14 @@ extern "C"
                 void *payload_ptr;
                 size_t payload_len;
             } payload;
+
+            // Bloc pour les données météo horaires
+            struct
+            {
+                float temperature; // Température en °C
+                float humidity;    // Humidité en %
+                int weather_code;  // Code météo (ex. 0 = ciel clair)
+            } weather_hourly;
         };
     } event_t;
 

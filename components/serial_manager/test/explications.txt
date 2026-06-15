@@ -1,0 +1,9 @@
+pour que le test fonctionne, ajouter "test/test_serial_manager.c" et unity
+idf_component_register(
+    SRCS "serial_manager.c" "test/test_serial_manager.c"
+    INCLUDE_DIRS "include"
+    PRIV_REQUIRES unity alert_manager esp_driver_uart freertos wifi esp_wifi
+)
+
+cd unity-app
+on lance idf.py -D EXTRA_COMPONENT_DIRS="C:/Chemin/Vers/Ton/Projet/components" -D TEST_COMPONENTS='serial_manager' build

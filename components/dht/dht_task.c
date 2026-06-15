@@ -10,6 +10,7 @@
 #include "event_bus.h"
 #include "esp_timer.h"
 #include "sdkconfig.h"
+#include "esp_task_wdt.h"
 
 #define DHT_TEMP_DELTA ((float)atof(CONFIG_DHT_TEMP_DELTA))
 #define DHT_HUM_DELTA  ((float)atof(CONFIG_DHT_HUM_DELTA))
@@ -30,6 +31,7 @@ static inline uint32_t now_ms(void)
 void dht_task(void *pvParameters)
 {
     (void)pvParameters;
+    esp_task_wdt_add(NULL);
 
     gpio_reset_pin(CONFIG_DHT_GPIO_PIN);
     gpio_set_pull_mode(CONFIG_DHT_GPIO_PIN, GPIO_PULLUP_ONLY);
@@ -42,6 +44,7 @@ void dht_task(void *pvParameters)
 
     while (1)
     {
+        esp_task_wdt_reset();
         esp_err_t ret = dht_perform_measurement();
         const dht_runtime_t *runtime = dht_get_runtime();
 

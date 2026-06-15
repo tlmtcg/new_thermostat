@@ -1,0 +1,7 @@
+menu "Serial Manager"
+
+    config SERIAL_MANAGER_ENABLED
+        bool "Enable Serial Manager"
+        default y
+
+    endmenu

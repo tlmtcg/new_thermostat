@@ -37,6 +37,17 @@ void time_manager_get_status(time_status_t *dest)
 
 static void time_sync_notification_cb(struct timeval *tv)
 {
+    struct tm now = time_utils_get_local_time();
+
+    ESP_LOGI(TAG,
+             "SNTP OK : %04d-%02d-%02d %02d:%02d:%02d",
+             now.tm_year + 1900,
+             now.tm_mon + 1,
+             now.tm_mday,
+             now.tm_hour,
+             now.tm_min,
+             now.tm_sec);
+
     s_last_sync = tv->tv_sec;
     s_time_status.last_sync_time = (uint32_t)tv->tv_sec;
 
@@ -59,7 +70,7 @@ static void time_sync_notification_cb(struct timeval *tv)
     event_t evt;
     evt.type = EVENT_NET_TIME_SYNCED;
     event_bus_publish(&evt);
-    
+
     ESP_LOGI(TAG, "Notification de synchronisation envoyée.");
 }
 
@@ -70,10 +81,12 @@ static void time_sync_notification_cb(struct timeval *tv)
 esp_err_t time_manager_init(void)
 {
     time_mutex = xSemaphoreCreateMutex();
-    if (!time_mutex) return ESP_ERR_NO_MEM;
+    if (!time_mutex)
+        return ESP_ERR_NO_MEM;
 
     // 1. Charger la config
-    if (!time_manager_storage_load(&cfg)) {
+    if (!time_manager_storage_load(&cfg))
+    {
         ESP_LOGW(TAG, "Config NVS introuvable, usage par défaut");
         strlcpy(cfg.ntp_server, CONFIG_SNTP_SERVER_NAME, sizeof(cfg.ntp_server));
         cfg.ntp_max_retry = CONFIG_SNTP_MAX_RETRY;
@@ -232,7 +245,8 @@ time_t parse_iso8601_to_epoch(const char *iso)
 
 void time_manager_start_sntp(void)
 {
-    if (esp_sntp_enabled()) return; // Déjà actif
+    if (esp_sntp_enabled())
+        return; // Déjà actif
 
     ESP_LOGI(TAG, "Démarrage SNTP : %s", cfg.ntp_server);
 
@@ -247,8 +261,8 @@ void time_manager_start_sntp(void)
 
     // On notifie le système qu'on commence
     s_time_status.is_syncing = true;
-    
-    // Note : Ne pas faire de boucle d'attente bloquante ici. 
+
+    // Note : Ne pas faire de boucle d'attente bloquante ici.
     // Le callback 'time_sync_notification_cb' gérera la suite.
 }
 
@@ -258,5 +272,6 @@ struct tm time_utils_get_local_time(void)
     struct tm info;
     time(&now);
     localtime_r(&now, &info);
+
     return info;
 }

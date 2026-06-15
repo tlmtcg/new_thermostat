@@ -12,6 +12,8 @@
 #include <string.h>
 #include <stdio.h>
 #include <time.h>
+#include "weather.h"
+#include <math.h>
 
 // Dépendances de l'application
 #include "event_bus.h"
@@ -37,12 +39,17 @@ typedef struct
 {
     float temperature;
     float humidity;
+    uint8_t description_code;
     float setpoint;
     bool relay_on;
-    bool wifi_connected;            // Ajout état connexion
-    char wifi_ip[OLED_IP_STR_SIZE]; // Ajout stockage IP
+    bool wifi_connected;
+    char wifi_ip[OLED_IP_STR_SIZE];
     bool dht_error;
     bool wifi_error;
+    float temperature_1h;
+    float humidity_1h;
+    uint8_t description_code_1h;
+
 } oled_local_data_t;
 
 static oled_local_data_t local_data = {
@@ -51,7 +58,11 @@ static oled_local_data_t local_data = {
     .setpoint = 19.0f,
     .relay_on = false,
     .wifi_connected = false,
-    .wifi_ip = "0.0.0.0"};
+    .wifi_ip = "0.0.0.0",
+    .description_code_1h = 0,
+    .temperature_1h = 0.f,
+    .humidity_1h = 0.0f,
+};
 
 // Dimensions et constantes de mise en page
 #define OLED_HEADER_HEIGHT 12
@@ -71,97 +82,83 @@ static void draw_wifi_page(void);
 /**
  * @brief Tâche OLED principale
  */
-static void oled_rtos_task(void *pvParameters)
-{
-    ESP_LOGI(TAG, "Tâche OLED démarrée et en attente du signal..."); // AJOUTE CECI
+static void oled_rtos_task(void *pvParameters) {
+    ESP_LOGI(TAG, "Tâche OLED démarrée et en attente du signal...");
     const oled_task_config_t *cfg = (const oled_task_config_t *)pvParameters;
     event_t evt;
 
-    // xEventGroupWaitBits(cfg->event_group, cfg->event_bit, pdFALSE, pdTRUE, portMAX_DELAY);
     uint32_t page_tick_counter = 0;
 
-    while (1)
-    {
-        // Traitement du bus
-        while (event_bus_receive(oled_queue, &evt, 0))
-        {
-            if (xSemaphoreTake(data_mutex, pdMS_TO_TICKS(5)) == pdTRUE)
-            {
-                switch (evt.type)
-                {
-                case EVENT_SENSOR_DHT:
-                case EVENT_SENSOR_SHT31:
-                    local_data.temperature = evt.sensor.temperature;
-                    local_data.humidity = evt.sensor.humidity;
-                    oled_service_add_temp_to_history(evt.sensor.temperature);
-                    break;
-                case EVENT_THERMOSTAT_SET:
-                    local_data.setpoint = evt.sensor.temperature;
-                    break;
-                case EVENT_RELAY_SET:
-                    local_data.relay_on = evt.net.bool_value;
-                    break;
-                case EVENT_SENSOR_ERROR_DHT:
-                    local_data.dht_error = true;
-                    break;
-                case EVENT_WIFI_STATUS:
-                    local_data.wifi_connected = evt.net.bool_value;
-                    // Si pas connecté, on déclenche l'alerte
-                    local_data.wifi_error = !evt.net.bool_value;
-                    local_data.wifi_connected = evt.net.bool_value;
-                    if (local_data.wifi_connected && evt.payload.payload_ptr != NULL)
-                    {
-                        strlcpy(local_data.wifi_ip, (const char *)evt.payload.payload_ptr, sizeof(local_data.wifi_ip));
+    while (1) {
+        // Traite tous les événements disponibles (sans bloquer)
+        while (event_bus_receive(oled_queue, &evt, 0)) {  // Timeout = 0 (non-bloquant)
+            if (xSemaphoreTake(data_mutex, pdMS_TO_TICKS(5)) == pdTRUE) {
+                switch (evt.type) {
+                    case EVENT_SENSOR_DHT:
+                    case EVENT_SENSOR_SHT31:
+                        local_data.temperature = evt.sensor.temperature;
+                        local_data.humidity = evt.sensor.humidity;
+                        oled_service_add_temp_to_history(evt.sensor.temperature);
+                        break;
+                    case EVENT_THERMOSTAT_SET:
+                        local_data.setpoint = evt.sensor.temperature;
+                        break;
+                    case EVENT_RELAY_SET:
+                        local_data.relay_on = evt.net.bool_value;
+                        break;
+                    case EVENT_SENSOR_ERROR_DHT:
+                        local_data.dht_error = true;
+                        break;
+                    case EVENT_WIFI_STATUS:
+                        local_data.wifi_connected = evt.net.bool_value;
+                        local_data.wifi_error = !evt.net.bool_value;
+                        if (local_data.wifi_connected && evt.payload.payload_ptr != NULL) {
+                            strlcpy(local_data.wifi_ip, (const char *)evt.payload.payload_ptr, sizeof(local_data.wifi_ip));
+                        } else {
+                            strlcpy(local_data.wifi_ip, "0.0.0.0", sizeof(local_data.wifi_ip));
+                        }
+                        break;
+                    case EVENT_WEATHER_HOURLY: {
+                        if (!isnan(evt.weather_hourly.temperature) &&
+                            !isnan(evt.weather_hourly.humidity) &&
+                            evt.weather_hourly.weather_code >= 0) {
+                            local_data.temperature_1h = evt.weather_hourly.temperature;
+                            local_data.humidity_1h = evt.weather_hourly.humidity;
+                            local_data.description_code_1h = (uint8_t)evt.weather_hourly.weather_code;
+                        } else {
+                            ESP_LOGW(TAG, "Données météo invalides reçues");
+                        }
+                        break;
                     }
-                    else
-                    {
-                        strlcpy(local_data.wifi_ip, "0.0.0.0", sizeof(local_data.wifi_ip));
-                    }
-                    break;
-                default:
-                    break;
+                    default:
+                        break;
                 }
                 xSemaphoreGive(data_mutex);
             }
         }
 
-        // Cycle de rotation
-        if (page_tick_counter >= 5000)
-        {
+        // --- Cycle de rotation des pages (toujours exécuté) ---
+        if (page_tick_counter >= 2000) {  // Change de page toutes les 4 secondes (si refresh_interval_ms = 500)
             current_page = (current_page + 1) % OLED_PAGE_COUNT;
             page_tick_counter = 0;
         }
 
-        // Rendu
+        // --- Rendu de la page actuelle ---
         ssd1306_clear(&oled_dev);
-        switch (current_page)
-        {
-        case OLED_PAGE_MAIN:
-            draw_main_page();
-            break;
-        case OLED_PAGE_HISTORY:
-            draw_history_page();
-            break;
-        case OLED_PAGE_TIME:
-            draw_time_page();
-            break;
-        case OLED_PAGE_WEATHER:
-            draw_weather_page();
-            break;
-        case OLED_PAGE_ALERTS:
-            draw_alert_page();
-            break;
-        case OLED_PAGE_WIFI:
-            draw_wifi_page();
-            break; // Nouvelle page WiFi
-        default:
-            draw_main_page();
-            break;
+        switch (current_page) {
+            case OLED_PAGE_MAIN: draw_main_page(); break;
+            case OLED_PAGE_HISTORY: draw_history_page(); break;
+            case OLED_PAGE_TIME: draw_time_page(); break;
+            case OLED_PAGE_WEATHER: draw_weather_page(); break;
+            case OLED_PAGE_ALERTS: draw_alert_page(); break;
+            case OLED_PAGE_WIFI: draw_wifi_page(); break;
+            default: draw_main_page(); break;
         }
-        ssd1306_update(&oled_dev);
+        ssd1306_update(&oled_dev);  // ✅ Rafraîchit l'OLED à chaque itération
 
+        // Attend avant la prochaine itération
         vTaskDelay(pdMS_TO_TICKS(cfg->refresh_interval_ms));
-        page_tick_counter += cfg->refresh_interval_ms;
+        page_tick_counter += cfg->refresh_interval_ms;  // ✅ Incrémente toujours
     }
 }
 
@@ -207,9 +204,10 @@ esp_err_t oled_service_init(i2c_master_bus_handle_t bus)
             EVENT_SENSOR_ERROR_DHT,
             EVENT_SENSOR_ERROR_SHT31,
             EVENT_WIFI_STATUS,
+            EVENT_WEATHER_HOURLY,
         };
 
-        oled_queue = event_bus_subscribe("oled_service", oled_filter, sizeof(oled_filter));
+        oled_queue = event_bus_subscribe("oled_service", oled_filter, 8);
         if (!oled_queue)
         {
             ESP_LOGE(TAG, "Échec de l'abonnement à l'Event Bus");
@@ -331,9 +329,9 @@ static void draw_history_page(void)
 
     // Affichage discret des bornes textuelles Min/Max sur le côté de l'axe Y
     char txt_buf[8];
-    snprintf(txt_buf, sizeof(txt_buf), "%.0f", max_t);
+    snprintf(txt_buf, sizeof(txt_buf), "%.1f", max_t);
     ssd1306_draw_string(&oled_dev, 0, 20, txt_buf);
-    snprintf(txt_buf, sizeof(txt_buf), "%.0f", min_t);
+    snprintf(txt_buf, sizeof(txt_buf), "%.1f", min_t);
     ssd1306_draw_string(&oled_dev, 0, 52, txt_buf);
 
     // 3. Tracé de la courbe
@@ -392,11 +390,47 @@ static void draw_time_page(void)
     draw_centered_string(45, date_buffer);
 }
 
-static void draw_weather_page(void)
+/**
+ * @brief Affiche la page météo sur l'OLED.
+ * @param local_data Données locales pour l'affichage.
+ */
+static void draw_weather_page()
 {
+    // ssd1306_clear(&oled_dev);
     draw_common_header("WEATHER FORECAST");
-    ssd1306_draw_string(&oled_dev, 5, 25, "Paris: Nuageux");
-    ssd1306_draw_string(&oled_dev, 5, 45, "Ext: 14.2 C");
+
+    // --- Température ---
+    char temp_str[16];
+    if (local_data.temperature_1h > -50.0f && local_data.temperature_1h < 60.0f)
+    {
+        snprintf(temp_str, sizeof(temp_str), "Ext: %.1f C", local_data.temperature_1h);
+    }
+    else
+    {
+        snprintf(temp_str, sizeof(temp_str), "Ext: N/A"); // Affiche "N/A" si la température est invalide
+    }
+    ssd1306_draw_string(&oled_dev, 5, 25, temp_str);
+
+    // --- Humidité ---
+    char hum_str[16];
+    if (local_data.humidity_1h >= 0.0f && local_data.humidity_1h <= 100.0f)
+    {
+        snprintf(hum_str, sizeof(hum_str), "Hum: %.1f %%", local_data.humidity_1h);
+    }
+    else
+    {
+        snprintf(hum_str, sizeof(hum_str), "Hum: N/A"); // Affiche "N/A" si l'humidité est invalide
+    }
+    ssd1306_draw_string(&oled_dev, 5, 35, hum_str);
+
+    // --- Description météo ---
+    const char *desc = get_weather_description(local_data.description_code_1h);
+    ssd1306_draw_string(&oled_dev, 5, 45, (char *)desc);
+
+    // --- Ville ---
+    ssd1306_draw_string(&oled_dev, 5, 55, "Paris");
+
+    // ssd1306_display(&oled_dev);
 }
 
 static void draw_alert_page(void)

@@ -62,7 +62,8 @@ float heating_get_temp(jour_t j, uint32_t now_sec)
 
 void heating_set_mode(heating_mode_t new_mode)
 {
-    if (new_mode >= HEATING_MODE_COUNT) return;
+    if (new_mode >= HEATING_MODE_COUNT)
+        return;
     config.mode = new_mode;
     ESP_LOGI(TAG, "Nouveau mode de chauffage selectionne : %d", new_mode);
 }
@@ -92,32 +93,45 @@ float heating_calculate_target_temperature(float ext_temp)
 {
     switch (config.mode)
     {
-        case HEATING_MODE_MANUAL:
-            // Mode Manuel : On applique strictement la consigne manuelle utilisateur
-            return config.manual_target;
+    case HEATING_MODE_MANUAL:
+        // Mode Manuel : On applique strictement la consigne manuelle utilisateur
+        return config.manual_target;
 
-        case HEATING_MODE_ABSENT:
-            // Mode Absent : Auto - 4°C
-            return heating_get_temp_current() - 4.0f;
+    case HEATING_MODE_ABSENT:
+        // Mode Absent : Auto - 4°C
+        float auto_target = heating_get_temp_current();
+        float target = auto_target - 4.0f;
 
-        case HEATING_MODE_HORS_GEL:
-            // Mode Hors-Gel : Température intérieure indexée sur l'extérieur pour économies
-            // Si Ext < 0°C  -> On maintient 12°C à l'intérieur (sécurité tuyaux gelés)
-            // Si Ext 0-10°C -> Loi linéaire décroissante (Plus il fait doux dehors, moins on chauffe)
-            // Si Ext > 10°C -> Plus besoin de maintenir un hors-gel élevé (8°C de base)
-            if (ext_temp < 0.0f) {
-                return 12.0f; 
-            } else if (ext_temp >= 0.0f && ext_temp <= 10.0f) {
-                // Équation de droite : à 0°C -> 12°C int. À 10°C -> 8°C int.
-                return 12.0f - (ext_temp * 0.4f); 
-            } else {
-                return 8.0f;
-            }
+        ESP_LOGI(TAG,
+                 "[ABSENT] auto=%.1f°C -> cible=%.1f°C",
+                 auto_target,
+                 target);
 
-        case HEATING_MODE_AUTO:
-        default:
-            // Mode Auto : On suit le planning horaire/jour standard
-            return heating_get_temp_current();
+        return target;
+
+    case HEATING_MODE_HORS_GEL:
+        // Mode Hors-Gel : Température intérieure indexée sur l'extérieur pour économies
+        // Si Ext < 0°C  -> On maintient 12°C à l'intérieur (sécurité tuyaux gelés)
+        // Si Ext 0-10°C -> Loi linéaire décroissante (Plus il fait doux dehors, moins on chauffe)
+        // Si Ext > 10°C -> Plus besoin de maintenir un hors-gel élevé (8°C de base)
+        if (ext_temp < 0.0f)
+        {
+            return 12.0f;
+        }
+        else if (ext_temp >= 0.0f && ext_temp <= 10.0f)
+        {
+            // Équation de droite : à 0°C -> 12°C int. À 10°C -> 8°C int.
+            return 12.0f - (ext_temp * 0.4f);
+        }
+        else
+        {
+            return 8.0f;
+        }
+
+    case HEATING_MODE_AUTO:
+    default:
+        // Mode Auto : On suit le planning horaire/jour standard
+        return heating_get_temp_current();
     }
 }
 
@@ -131,8 +145,8 @@ esp_err_t heating_init(void)
 
     /* 1. INIT RAM par défaut */
     memset(&config, 0, sizeof(config));
-    config.mode = HEATING_MODE_AUTO;       // Mode auto par défaut
-    config.manual_target = 20.0f;          // Consigne manuelle de repli
+    config.mode = HEATING_MODE_AUTO; // Mode auto par défaut
+    config.manual_target = 20.0f;    // Consigne manuelle de repli
 
     for (int d = 0; d < NB_JOURS; d++)
     {
@@ -221,13 +235,15 @@ void heating_reset_defaults(void)
 char *heating_get_json(void)
 {
     cJSON *root = cJSON_CreateObject();
-    if (!root) return NULL;
+    if (!root)
+        return NULL;
 
     cJSON_AddNumberToObject(root, "mode", config.mode);
     cJSON_AddNumberToObject(root, "manual_target", config.manual_target);
 
     cJSON *days = cJSON_CreateArray();
-    if (!days) {
+    if (!days)
+    {
         cJSON_Delete(root);
         return NULL;
     }
@@ -236,19 +252,22 @@ char *heating_get_json(void)
     for (int d = 0; d < NB_JOURS; d++)
     {
         cJSON *day = cJSON_CreateObject();
-        if (!day) goto fail;
+        if (!day)
+            goto fail;
         cJSON_AddItemToArray(days, day);
 
         cJSON_AddNumberToObject(day, "day_idx", d);
 
         cJSON *slots = cJSON_CreateArray();
-        if (!slots) goto fail;
+        if (!slots)
+            goto fail;
         cJSON_AddItemToObject(day, "slots", slots);
 
         for (int p = 0; p < NB_PLAGES; p++)
         {
             cJSON *slot = cJSON_CreateObject();
-            if (!slot) goto fail;
+            if (!slot)
+                goto fail;
             cJSON_AddItemToArray(slots, slot);
 
             cJSON_AddNumberToObject(slot, "id", p);
@@ -273,7 +292,14 @@ fail:
 float heating_get_temp_current()
 {
     struct tm t = time_utils_get_local_time();
-    int j = (t.tm_wday + 6) % 7; 
+
+    if (t.tm_year < (2024 - 1900))
+    {
+        ESP_LOGW(TAG, "Heure invalide, utilisation consigne par défaut");
+        return 21.0f;
+    }
+
+    int j = (t.tm_wday + 6) % 7;
 
     if (j >= NB_JOURS)
         return -1.0f;
@@ -325,18 +351,20 @@ int64_t heating_program_get_next_target_timestamp(void)
     {
         uint32_t s = config.planning[cur_day][p].secondes_minuit;
 
-        if (s <= sec_since_midnight) {
+        if (s <= sec_since_midnight)
+        {
             continue;
         }
 
         struct tm slot_tm = now_tm;
         slot_tm.tm_hour = s / 3600;
-        slot_tm.tm_min  = (s % 3600) / 60;
-        slot_tm.tm_sec  = s % 60;
+        slot_tm.tm_min = (s % 3600) / 60;
+        slot_tm.tm_sec = s % 60;
 
         time_t slot_ts = mktime(&slot_tm);
 
-        if (slot_ts > now_ts) {
+        if (slot_ts > now_ts)
+        {
             return slot_ts;
         }
     }
@@ -345,8 +373,8 @@ int64_t heating_program_get_next_target_timestamp(void)
     struct tm tomorrow_tm = now_tm;
     tomorrow_tm.tm_mday += 1;
     tomorrow_tm.tm_hour = 0;
-    tomorrow_tm.tm_min  = 0;
-    tomorrow_tm.tm_sec  = 0;
+    tomorrow_tm.tm_min = 0;
+    tomorrow_tm.tm_sec = 0;
 
     int64_t best_ts = -1;
 
@@ -356,8 +384,8 @@ int64_t heating_program_get_next_target_timestamp(void)
 
         struct tm slot_tm = tomorrow_tm;
         slot_tm.tm_hour = s / 3600;
-        slot_tm.tm_min  = (s % 3600) / 60;
-        slot_tm.tm_sec  = s % 60;
+        slot_tm.tm_min = (s % 3600) / 60;
+        slot_tm.tm_sec = s % 60;
 
         time_t slot_ts = mktime(&slot_tm);
 
@@ -367,3 +395,4 @@ int64_t heating_program_get_next_target_timestamp(void)
 
     return best_ts;
 }
+

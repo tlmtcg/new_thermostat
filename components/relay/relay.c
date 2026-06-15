@@ -6,6 +6,7 @@
 #include "event_bus.h"
 #include "sdkconfig.h"
 #include "utils.h"
+#include "esp_task_wdt.h"
 
 static const char *TAG = "RELAY";
 
@@ -315,6 +316,8 @@ bool get_relay_state(void)
 
 void relay_task(void *arg)
 {
+    esp_task_wdt_add(NULL);
+
     // Le filtre écoute désormais uniquement EVENT_RELAY_SET
     static const event_type_t filter[] = {EVENT_RELAY_SET};
 
@@ -332,11 +335,13 @@ void relay_task(void *arg)
 
     while (1)
     {
+        esp_task_wdt_reset();  // ✅ Réinitialise le WDT régulièrement
         // Réception bloquante rythmée par la file
         if (event_bus_receive(q, &evt, pdMS_TO_TICKS(200)))
         {
             if (evt.type == EVENT_RELAY_SET)
             {
+                esp_task_wdt_reset();
                 ESP_LOGI(TAG, "RELAY %s", evt.net.bool_value ? "ON" : "OFF");
                 relay_set(evt.net.bool_value);
             }   

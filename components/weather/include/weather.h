@@ -14,7 +14,6 @@ extern "C"
         float humidity;
         float pressure;
         int weather_code;
-        float jee_temp;
         bool meteo_valid;
     } weather_entry_t;
 
@@ -42,8 +41,6 @@ extern "C"
 
     esp_err_t weather_update(weather_data_t *data);
 
-    esp_err_t jeedom_temp_update(weather_data_t *data);
-
     extern weather_data_t g_latest_weather;
 
     float temperature_get_outdoor();
@@ -67,6 +64,10 @@ extern "C"
     bool temperature_get_valid();
 
     void temperature_set_valid(bool result);
+
+    bool weather_publish_hourly(float temperature, float humidity, int weather_code);
+
+    void weather_init(void);
 
 #ifdef __cplusplus
 }

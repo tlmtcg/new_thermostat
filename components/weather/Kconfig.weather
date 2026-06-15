@@ -1,0 +1,32 @@
+
+menu "Configuration Météo"
+
+    config OPEN_WEATHER_MAP_KEY
+        string "Clé API OpenWeatherMap"
+        default "70a685fb0de842b5f2ec972448504339"
+        help
+            Entrez votre clé API OpenWeatherMap.
+            Vous pouvez obtenir une clé gratuite sur https://openweathermap.org/api.
+
+    config WEATHER_LAT
+        float "Latitude"
+        default 48.8566
+        range -90.0 90.0
+        help
+            Latitude de votre emplacement (ex. 48.8566 pour Paris).
+
+    config WEATHER_LON
+        float "Longitude"
+        default 2.3522
+        range -180.0 180.0
+        help
+            Longitude de votre emplacement (ex. 2.3522 pour Paris).
+
+    config WEATHER_UPDATE_INTERVAL_MINUTES
+        int "Intervalle de mise à jour (minutes)"
+        default 60
+        range 10 1440
+        help
+            Intervalle entre les mises à jour des données météo (en minutes).
+
+endmenu

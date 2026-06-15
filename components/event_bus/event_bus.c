@@ -181,7 +181,6 @@ void event_bus_get_stats(event_bus_stats_t *out)
     }
 }
 
-// CORRECTION : Remplacement direct des types internes
 static void get_casted_stats(event_bus_stats_t *dst)
 {
     event_bus_get_stats(dst);

@@ -18,6 +18,7 @@ menu "Thermostat Configuration"
         rsource "../components/system_manager/Kconfig.system_manager"
         rsource "../components/wifi_app/Kconfig.wifi"
         rsource "../components/time_manager/Kconfig.time_manager"
+        rsource "../components/weather/Kconfig.weather"
     endmenu
 
 endmenu

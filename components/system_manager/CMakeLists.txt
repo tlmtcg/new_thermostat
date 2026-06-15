@@ -13,4 +13,5 @@ idf_component_register(
         thermostat_task
         wifi_app
         time_manager
+        weather
 )              

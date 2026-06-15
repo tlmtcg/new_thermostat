@@ -28,7 +28,7 @@ menu "Sensor DHT"
 
     config DHT_PANNE_SEUIL_CONSECUTIF
         int "DHT PANNE SEUIL CONSECUTIF"
-        default 3
+        default 5
         range 1 20
 
     config DHT_SETUP_DELAY

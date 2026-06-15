@@ -14,4 +14,5 @@ idf_component_register(
         i2c_shared
         event_bus
         relay
+        weather
 )

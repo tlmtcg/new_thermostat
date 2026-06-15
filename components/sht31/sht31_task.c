@@ -13,6 +13,7 @@
 #include "freertos/task.h"
 #include "sht31.h"
 #include "event_bus.h"
+#include "esp_task_wdt.h"
 
 static const char *TAG = "SHT31_TASK";
 
@@ -26,7 +27,8 @@ static float last_published_hum = NAN;
 static uint32_t last_publish_ms = 0;
 
 void sht31_task(void *pvParameters)
-{
+{;
+    esp_task_wdt_add(NULL);
     if (pvParameters == NULL)
     {
         ESP_LOGE(TAG, "Argument pvParameters obligatoire manquant ! Suppression de la tâche.");
@@ -40,6 +42,7 @@ void sht31_task(void *pvParameters)
 
     while (1)
     {
+        esp_task_wdt_reset();
         // ---------------------------------------------------------
         // 1) Attente du signal de démarrage avec un timeout adaptatif
         // ---------------------------------------------------------

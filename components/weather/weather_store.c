@@ -61,13 +61,4 @@ weather_entry_t weather_store_get_current(void)
     return temp;
 }
 
-float weather_store_get_jee_temp(void)
-{
-    float temp = 0.0f;
-    if (mutex && xSemaphoreTake(mutex, portMAX_DELAY) == pdTRUE)
-    {
-        temp = store.current.jee_temp;
-        xSemaphoreGive(mutex);
-    }
-    return temp;
-}
+

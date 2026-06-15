@@ -7,45 +7,118 @@
 #include "esp_crt_bundle.h"
 #include "esp_task_wdt.h"
 #include "weather.h"
-#include "alert_manager.h"
-#include "config_runtime.h"
+#include "event_bus.h" // Pour event_t, EVENT_WEATHER_HOURLY, etc.
 #include "weather_store.h"
-#include "thermostat.h"
-#include "time_utils.h"
 
 // Définition de MIN
 #define MIN(a, b) ((a) < (b) ? (a) : (b))
 
-#define OPEN_WEATHER_MAP_KEY "70a685fb0de842b5f2ec972448504339"
+// Clé API OpenWeatherMap (à définir dans menuconfig)
+#define OPEN_WEATHER_MAP_KEY CONFIG_OPEN_WEATHER_MAP_KEY
 
 // --- Constants ---
 static const char *TAG = "WEATHER";
 #define MAX_HTTP_RECV_BUFFER 25600 // 25 Ko
 #define OPEN_METEO_URL "https://api.open-meteo.com/v1/forecast"
-#define YR_NO_URL "https://api.met.no/weatherapi/locationforecast/2.0/compact"
-#define JEEDOM_URL "http://192.168.0.21/core/api/jeeApi.php?apikey=d8RaIZcJA0iAaUkQGMVyLhk0rAZq2nGl&type=cmd&id=16109"
 
 // --- Global Variables ---
-static char *response_data = NULL;
-static int weather_response_len = 0;
+// Buffer statique pour éviter malloc/free
+static char response_buffer[MAX_HTTP_RECV_BUFFER + 1];
+static size_t response_len = 0;
+static weather_data_t s_cached_weather_data;
+static time_t s_last_weather_update = 0;
+static const int WEATHER_CACHE_DURATION = 3600; // 1 heure (en secondes)
+
+// Données météo globales (à remplacer par s_weather_data si tu préfères)
 weather_data_t g_weather_data = {0};
-esp_err_t jeedom_temp_update(weather_data_t *data);
-weather_data_t latest_weather = {0};
+
+// Variable globale pour la queue d'événements WiFi
+static QueueHandle_t s_wifi_event_queue = NULL;
+
+// Mutex pour protéger g_weather_data
+static SemaphoreHandle_t g_weather_mutex = NULL;
 
 // --- Function Prototypes ---
 static esp_err_t _http_event_handler(esp_http_client_event_t *evt);
 static esp_err_t http_get_to_buffer(const char *url, int timeout_ms);
 static esp_err_t parse_open_meteo_json(cJSON *root, weather_data_t *data);
-static esp_err_t weather_update_fallback(weather_data_t *data);
-
-static char *weather_to_json(const weather_data_t *data);
 static esp_err_t parse_owm_forecast(cJSON *root, weather_data_t *data);
 static esp_err_t parse_owm_current(cJSON *root, weather_data_t *data);
 static void interpolate_48h_safe(float *src_temp, float *src_hum, int *src_code,
                                  int src_count,
                                  float *dst_temp, float *dst_hum, int *dst_code);
-
 static int owm_to_openmeteo(int owm);
+static time_t parse_iso8601_to_epoch(const char *iso8601_str);
+
+// Fonction pour vérifier si le cache est valide
+static bool weather_cache_is_valid(void)
+{
+    time_t now = time(NULL);
+    return (now - s_last_weather_update) < WEATHER_CACHE_DURATION;
+}
+
+// Fonction pour mettre à jour le cache
+static void weather_cache_update(const weather_data_t *data)
+{
+    if (data)
+    {
+        memcpy(&s_cached_weather_data, data, sizeof(weather_data_t));
+        s_last_weather_update = time(NULL);
+    }
+}
+
+// --- Helper: Parse ISO8601 to Epoch ---
+static time_t parse_iso8601_to_epoch(const char *iso8601_str)
+{
+    if (!iso8601_str)
+        return -1;
+
+    struct tm tm = {0};
+    int year, month, day, hour, min, sec = 0;
+
+    // Exemple de formats supportés :
+    // "2026-06-14T18:30" (sans secondes)
+    // "2026-06-14T18:30:00" (avec secondes)
+    // "2026-06-14T18:30:00Z" (avec Z pour UTC)
+
+    // Essaye de parser avec secondes et Z
+    if (sscanf(iso8601_str, "%d-%d-%dT%d:%d:%dZ", &year, &month, &day, &hour, &min, &sec) == 6)
+    {
+        tm.tm_year = year - 1900;
+        tm.tm_mon = month - 1;
+        tm.tm_mday = day;
+        tm.tm_hour = hour;
+        tm.tm_min = min;
+        tm.tm_sec = sec;
+        return timegm(&tm);
+    }
+    // Essaye de parser avec secondes (sans Z)
+    else if (sscanf(iso8601_str, "%d-%d-%dT%d:%d:%d", &year, &month, &day, &hour, &min, &sec) == 6)
+    {
+        tm.tm_year = year - 1900;
+        tm.tm_mon = month - 1;
+        tm.tm_mday = day;
+        tm.tm_hour = hour;
+        tm.tm_min = min;
+        tm.tm_sec = sec;
+        return timegm(&tm);
+    }
+    // Essaye de parser sans secondes (format Open-Meteo)
+    else if (sscanf(iso8601_str, "%d-%d-%dT%d:%d", &year, &month, &day, &hour, &min) == 5)
+    {
+        tm.tm_year = year - 1900;
+        tm.tm_mon = month - 1;
+        tm.tm_mday = day;
+        tm.tm_hour = hour;
+        tm.tm_min = min;
+        tm.tm_sec = 0; // Secondes à 0
+        return timegm(&tm);
+    }
+
+    // Si aucun format ne correspond
+    ESP_LOGW(TAG, "Format de timestamp non reconnu : %s", iso8601_str);
+    return -1;
+}
 
 // --- Helper: Weather Description ---
 const char *get_weather_description(int code)
@@ -88,38 +161,78 @@ const char *get_weather_description(int code)
     }
 }
 
+// Fonction pour initialiser l'abonnement aux événements WiFi
+static void weather_init_event_bus(void)
+{
+    event_type_t filter[] = {EVENT_WIFI_STATUS};
+    s_wifi_event_queue = event_bus_subscribe("weather_service", filter, 1);
+    assert(s_wifi_event_queue != NULL);
+}
+
+// Tâche pour écouter les événements WiFi
+static void weather_wifi_task(void *arg)
+{
+    (void)arg;
+    event_t evt;
+
+    while (1)
+    {
+        if (event_bus_receive(s_wifi_event_queue, &evt, portMAX_DELAY))
+        {
+            if (evt.type == EVENT_WIFI_STATUS && evt.net.bool_value)
+            {
+                ESP_LOGI(TAG, "WiFi connecté, lancement de la mise à jour météo...");
+
+                // Attend 3 secondes pour stabiliser le réseau
+                vTaskDelay(pdMS_TO_TICKS(3000));
+
+                // Lance la mise à jour météo
+                weather_data_t weather_data;
+                if (weather_update(&weather_data) == ESP_OK)
+                {
+                    ESP_LOGI(TAG, "Mise à jour météo réussie après connexion WiFi");
+                }
+                else
+                {
+                    ESP_LOGE(TAG, "Échec de la mise à jour météo");
+                }
+            }
+        }
+    }
+}
+
+void weather_init(void)
+{
+    g_weather_mutex = xSemaphoreCreateMutex();
+    assert(g_weather_mutex != NULL);
+
+    // Initialise l'abonnement aux événements WiFi
+    weather_init_event_bus();
+
+    // Crée la tâche pour écouter les événements WiFi
+    xTaskCreate(
+        weather_wifi_task,
+        "weather_wifi_task",
+        8192,
+        NULL,
+        tskIDLE_PRIORITY + 1,
+        NULL);
+}
+
 // --- HTTP Event Handler ---
 static esp_err_t _http_event_handler(esp_http_client_event_t *evt)
 {
     if (evt->event_id == HTTP_EVENT_ON_DATA)
     {
-        if (!response_data)
+        if (response_len + evt->data_len >= MAX_HTTP_RECV_BUFFER)
         {
-            response_data = malloc(evt->data_len + 1);
-            if (!response_data)
-            {
-                ESP_LOGE(TAG, "Failed to allocate initial buffer");
-                return ESP_ERR_NO_MEM;
-            }
-            weather_response_len = 0;
-        }
-        else if (weather_response_len + evt->data_len >= MAX_HTTP_RECV_BUFFER)
-        {
-            ESP_LOGE(TAG, "Buffer overflow");
+            ESP_LOGE(TAG, "Buffer overflow (max: %d, current: %zu, new: %d)",
+                     MAX_HTTP_RECV_BUFFER, response_len, evt->data_len);
             return ESP_FAIL;
         }
-
-        char *new_data = realloc(response_data, weather_response_len + evt->data_len + 1);
-        if (!new_data)
-        {
-            ESP_LOGE(TAG, "Failed to reallocate buffer");
-            return ESP_ERR_NO_MEM;
-        }
-
-        response_data = new_data;
-        memcpy(response_data + weather_response_len, evt->data, evt->data_len);
-        weather_response_len += evt->data_len;
-        response_data[weather_response_len] = '\0';
+        memcpy(response_buffer + response_len, evt->data, evt->data_len);
+        response_len += evt->data_len;
+        response_buffer[response_len] = '\0'; // Terminaison null
     }
     return ESP_OK;
 }
@@ -127,19 +240,16 @@ static esp_err_t _http_event_handler(esp_http_client_event_t *evt)
 // --- HTTP GET Request ---
 static esp_err_t http_get_to_buffer(const char *url, int timeout_ms)
 {
-    if (response_data)
-    {
-        free(response_data);
-        response_data = NULL;
-    }
-    weather_response_len = 0;
+    // Réinitialise le buffer et sa taille
+    response_len = 0;
+    memset(response_buffer, 0, sizeof(response_buffer));
 
     esp_http_client_config_t config = {
         .url = url,
         .event_handler = _http_event_handler,
         .crt_bundle_attach = esp_crt_bundle_attach,
         .timeout_ms = timeout_ms,
-        .buffer_size = 8192,
+        .buffer_size = 8192, // Taille du buffer interne ESP-HTTP-Client
     };
 
     esp_http_client_handle_t client = esp_http_client_init(&config);
@@ -153,29 +263,371 @@ static esp_err_t http_get_to_buffer(const char *url, int timeout_ms)
     esp_err_t err = esp_http_client_perform(client);
     esp_http_client_cleanup(client);
 
-    if (err != ESP_OK || !response_data || weather_response_len == 0)
+    if (err != ESP_OK || response_len == 0)
     {
         ESP_LOGE(TAG, "HTTP request failed or empty response");
         return ESP_FAIL;
     }
 
-    // ESP_LOGI(TAG, "HTTP Response (first 200 chars): %.*s", MIN(200, weather_response_len), response_data);
     return ESP_OK;
 }
 
-/**
- * @brief Parse une réponse JSON de l'API Open-Meteo et remplit la structure weather_data_t.
- *
- * @param root Pointeur vers l'objet racine cJSON.
- * @param data Pointeur vers la structure weather_data_t à remplir.
- * @return esp_err_t ESP_OK si le parsing réussit, ESP_FAIL sinon.
- */
+// --- Parsing Functions ---
+static esp_err_t parse_owm_current(cJSON *root, weather_data_t *data)
+{
+    if (!root || !data)
+    {
+        ESP_LOGE(TAG, "root ou data est NULL");
+        return ESP_ERR_INVALID_ARG;
+    }
+
+    // Initialisation des valeurs par défaut
+    data->current.temperature = 0.0f;
+    data->current.humidity = 0.0f;
+    data->current.pressure = 0.0f;
+    data->current.weather_code = 0;
+    data->current.timestamp = 0;
+    data->current.meteo_valid = false;
+
+    // Parsing de "main"
+    cJSON *main = cJSON_GetObjectItem(root, "main");
+    if (!main)
+    {
+        ESP_LOGE(TAG, "OWM current: 'main' manquant");
+        return ESP_FAIL;
+    }
+
+    cJSON *temp = cJSON_GetObjectItem(main, "temp");
+    cJSON *hum = cJSON_GetObjectItem(main, "humidity");
+    cJSON *pres = cJSON_GetObjectItem(main, "pressure");
+
+    if (cJSON_IsNumber(temp))
+    {
+        data->current.temperature = (float)temp->valuedouble;
+    }
+    else
+    {
+        ESP_LOGW(TAG, "OWM current: 'temp' manquant ou invalide");
+    }
+
+    if (cJSON_IsNumber(hum))
+    {
+        data->current.humidity = (float)hum->valuedouble;
+    }
+    else
+    {
+        ESP_LOGW(TAG, "OWM current: 'humidity' manquant ou invalide");
+    }
+
+    if (cJSON_IsNumber(pres))
+    {
+        data->current.pressure = (float)pres->valuedouble;
+    }
+    else
+    {
+        ESP_LOGW(TAG, "OWM current: 'pressure' manquant ou invalide");
+    }
+
+    // Parsing de "weather" (code météo)
+    cJSON *weather = cJSON_GetObjectItem(root, "weather");
+    if (cJSON_IsArray(weather) && cJSON_GetArraySize(weather) > 0)
+    {
+        cJSON *w0 = cJSON_GetArrayItem(weather, 0);
+        if (w0)
+        {
+            cJSON *id = cJSON_GetObjectItem(w0, "id");
+            if (cJSON_IsNumber(id))
+            {
+                data->current.weather_code = owm_to_openmeteo(id->valueint);
+            }
+            else
+            {
+                ESP_LOGW(TAG, "OWM current: 'weather[0].id' manquant ou invalide");
+            }
+        }
+    }
+    else
+    {
+        ESP_LOGW(TAG, "OWM current: 'weather' manquant ou vide");
+    }
+
+    // Timestamp (UTC)
+    cJSON *dt = cJSON_GetObjectItem(root, "dt");
+    if (cJSON_IsNumber(dt))
+    {
+        data->current.timestamp = (time_t)dt->valueint;
+    }
+    else
+    {
+        data->current.timestamp = time(NULL);
+        ESP_LOGW(TAG, "OWM current: 'dt' manquant ou invalide, utilisation de time(NULL)");
+    }
+
+    // Valide si tous les champs critiques sont présents
+    data->current.meteo_valid =
+        (data->current.temperature != 0.0f) &&
+        (data->current.humidity != 0.0f) &&
+        (data->current.weather_code != 0);
+
+    return ESP_OK;
+}
+
+static esp_err_t parse_owm_forecast(cJSON *root, weather_data_t *data)
+{
+    if (!root || !data)
+    {
+        ESP_LOGE(TAG, "root ou data est NULL");
+        return ESP_ERR_INVALID_ARG;
+    }
+
+    cJSON *list = cJSON_GetObjectItem(root, "list");
+    if (!cJSON_IsArray(list))
+    {
+        ESP_LOGE(TAG, "OWM forecast: 'list' manquant ou invalide");
+        return ESP_FAIL;
+    }
+
+    int count = cJSON_GetArraySize(list);
+    if (count == 0)
+    {
+        ESP_LOGE(TAG, "OWM forecast: 'list' vide");
+        return ESP_FAIL;
+    }
+
+    // Tableaux temporaires pour les données OWM (3h)
+    float temp3h[count];
+    float hum3h[count];
+    int code3h[count];
+    time_t ts3h[count];
+
+    // Extraction des données OWM
+    for (int i = 0; i < count; i++)
+    {
+        cJSON *entry = cJSON_GetArrayItem(list, i);
+        if (!entry)
+            continue;
+
+        cJSON *main = cJSON_GetObjectItem(entry, "main");
+        cJSON *weather = cJSON_GetObjectItem(entry, "weather");
+        cJSON *dt = cJSON_GetObjectItem(entry, "dt");
+
+        if (main)
+        {
+            cJSON *t = cJSON_GetObjectItem(main, "temp");
+            cJSON *h = cJSON_GetObjectItem(main, "humidity");
+            temp3h[i] = (t && cJSON_IsNumber(t)) ? (float)t->valuedouble : 0.0f;
+            hum3h[i] = (h && cJSON_IsNumber(h)) ? (float)h->valuedouble : 0.0f;
+        }
+        else
+        {
+            temp3h[i] = 0.0f;
+            hum3h[i] = 0.0f;
+        }
+
+        if (weather && cJSON_IsArray(weather) && cJSON_GetArraySize(weather) > 0)
+        {
+            cJSON *w0 = cJSON_GetArrayItem(weather, 0);
+            if (w0)
+            {
+                cJSON *id = cJSON_GetObjectItem(w0, "id");
+                code3h[i] = (id && cJSON_IsNumber(id)) ? owm_to_openmeteo(id->valueint) : 0;
+            }
+            else
+            {
+                code3h[i] = 0;
+            }
+        }
+        else
+        {
+            code3h[i] = 0;
+        }
+
+        ts3h[i] = (dt && cJSON_IsNumber(dt)) ? (time_t)dt->valueint : 0;
+    }
+
+    // Interpolation vers 48 points horaires
+    interpolate_48h_safe(temp3h, hum3h, code3h, count,
+                         data->forecast_48h_temp,
+                         data->forecast_48h_hum,
+                         data->forecast_48h_code);
+
+    // Remplit les données pour la prévision 48h (dernier point)
+    if (count > 0)
+    {
+        data->forecast_48h.temperature = data->forecast_48h_temp[47];
+        data->forecast_48h.humidity = data->forecast_48h_hum[47];
+        data->forecast_48h.timestamp = data->current.timestamp + (47 * 3600);
+    }
+
+    // Prévisions 7 jours (point le plus proche de midi UTC)
+    for (int d = 0; d < 7; d++)
+    {
+        time_t target_ts = data->current.timestamp + (d + 1) * 86400; // Midi UTC le jour suivant
+        target_ts += 12 * 3600;                                       // 12h00 UTC
+
+        int best_idx = 0;
+        long min_diff = LONG_MAX;
+
+        for (int i = 0; i < count; i++)
+        {
+            if (ts3h[i] == 0)
+                continue;
+            long diff = labs((long)ts3h[i] - (long)target_ts);
+            if (diff < min_diff)
+            {
+                min_diff = diff;
+                best_idx = i;
+            }
+        }
+
+        if (min_diff != LONG_MAX)
+        {
+            data->forecast_7j[d].temperature = temp3h[best_idx];
+            data->forecast_7j[d].weather_code = code3h[best_idx];
+            data->forecast_7j[d].timestamp = ts3h[best_idx];
+        }
+        else
+        {
+            data->forecast_7j[d].temperature = 0.0f;
+            data->forecast_7j[d].weather_code = 0;
+            data->forecast_7j[d].timestamp = 0;
+        }
+    }
+
+    return ESP_OK;
+}
+
+static void interpolate_48h_safe(float *src_temp, float *src_hum, int *src_code,
+                                 int src_count,
+                                 float *dst_temp, float *dst_hum, int *dst_code)
+{
+    if (!src_temp || !src_hum || !src_code || !dst_temp || !dst_hum || !dst_code)
+    {
+        return;
+    }
+
+    if (src_count <= 0)
+    {
+        for (int i = 0; i < 48; i++)
+        {
+            dst_temp[i] = 0.0f;
+            dst_hum[i] = 0.0f;
+            dst_code[i] = 0;
+        }
+        return;
+    }
+
+    if (src_count == 1)
+    {
+        float t = src_temp[0];
+        float h = src_hum[0];
+        int c = src_code[0];
+        for (int i = 0; i < 48; i++)
+        {
+            dst_temp[i] = t;
+            dst_hum[i] = h;
+            dst_code[i] = c;
+        }
+        return;
+    }
+
+    for (int i = 0; i < 48; i++)
+    {
+        float pos = (float)i / 48.0f * (src_count - 1);
+        int seg = (int)pos;
+        float k = pos - seg;
+
+        if (seg >= src_count - 1)
+        {
+            seg = src_count - 2;
+            k = 1.0f;
+        }
+
+        dst_temp[i] = src_temp[seg] + (src_temp[seg + 1] - src_temp[seg]) * k;
+        dst_hum[i] = src_hum[seg] + (src_hum[seg + 1] - src_hum[seg]) * k;
+        dst_code[i] = (k < 0.5f) ? src_code[seg] : src_code[seg + 1];
+    }
+}
+
+static int owm_to_openmeteo(int owm)
+{
+    // Thunderstorm (Orage)
+    if (owm >= 200 && owm <= 202)
+        return 95;
+    if (owm >= 210 && owm <= 212)
+        return 95;
+    if (owm >= 221 && owm <= 232)
+        return 96;
+
+    // Drizzle (Bruine)
+    if (owm >= 300 && owm <= 302)
+        return 51;
+    if (owm >= 310 && owm <= 314)
+        return 53;
+    if (owm == 321)
+        return 55;
+
+    // Rain (Pluie)
+    if (owm >= 500 && owm <= 501)
+        return 61;
+    if (owm == 502)
+        return 63;
+    if (owm >= 503 && owm <= 504)
+        return 65;
+    if (owm == 511)
+        return 67;
+    if (owm >= 520 && owm <= 531)
+        return 80;
+
+    // Snow (Neige)
+    if (owm >= 600 && owm <= 602)
+        return 71;
+    if (owm >= 611 && owm <= 613)
+        return 73;
+    if (owm >= 615 && owm <= 616)
+        return 75;
+    if (owm >= 620 && owm <= 622)
+        return 77;
+
+    // Atmosphere (Brouillard, etc.)
+    if (owm == 701)
+        return 45;
+    if (owm == 711)
+        return 45;
+    if (owm == 721)
+        return 48;
+    if (owm == 731 || owm == 751 || owm == 761)
+        return 45;
+    if (owm == 741)
+        return 45;
+    if (owm == 762)
+        return 45;
+    if (owm == 771)
+        return 80;
+    if (owm == 781)
+        return 99;
+
+    // Clear (Ciel clair)
+    if (owm == 800)
+        return 0;
+
+    // Clouds (Nuages)
+    if (owm == 801)
+        return 1;
+    if (owm == 802)
+        return 2;
+    if (owm >= 803 && owm <= 804)
+        return 3;
+
+    return 3; // Fallback: couvert
+}
+
 static esp_err_t parse_open_meteo_json(cJSON *root, weather_data_t *data)
 {
     if (!root || !data)
     {
-        ESP_LOGE(TAG, "Erreur : root ou data est NULL");
-        return ESP_FAIL;
+        ESP_LOGE(TAG, "root ou data est NULL");
+        return ESP_ERR_INVALID_ARG;
     }
 
     // --- 1. Parsing du bloc CURRENT ---
@@ -183,7 +635,7 @@ static esp_err_t parse_open_meteo_json(cJSON *root, weather_data_t *data)
     if (!current)
     {
         ESP_LOGE(TAG, "Bloc 'current' manquant");
-        return ESP_FAIL;
+        return ESP_ERR_INVALID_RESPONSE;
     }
 
     // Extraction des champs current
@@ -193,12 +645,11 @@ static esp_err_t parse_open_meteo_json(cJSON *root, weather_data_t *data)
     cJSON *code_item = cJSON_GetObjectItemCaseSensitive(current, "weather_code");
     cJSON *press_item = cJSON_GetObjectItemCaseSensitive(current, "surface_pressure");
 
+    // Parsing de current.time
     if (cJSON_IsString(time_item) && time_item->valuestring != NULL)
     {
-        // Conversion ISO8601 -> epoch
         data->current.timestamp = parse_iso8601_to_epoch(time_item->valuestring);
-
-        if (data->current.timestamp == 0)
+        if (data->current.timestamp == -1)
         {
             ESP_LOGW(TAG, "Impossible de parser current.time (%s)", time_item->valuestring);
             data->current.timestamp = time(NULL);
@@ -210,9 +661,19 @@ static esp_err_t parse_open_meteo_json(cJSON *root, weather_data_t *data)
         ESP_LOGW(TAG, "Champ 'current.time' manquant ou invalide");
     }
 
+    // Parsing de current.temperature_2m
     if (temp_item && cJSON_IsNumber(temp_item))
     {
-        data->current.temperature = (float)temp_item->valuedouble;
+        float temp = (float)temp_item->valuedouble;
+        if (temp >= -50.0f && temp <= 60.0f)
+        {
+            data->current.temperature = temp;
+        }
+        else
+        {
+            ESP_LOGW(TAG, "Température invalide: %.1f°C", temp);
+            data->current.temperature = 0.0f;
+        }
     }
     else
     {
@@ -220,9 +681,19 @@ static esp_err_t parse_open_meteo_json(cJSON *root, weather_data_t *data)
         ESP_LOGW(TAG, "Champ 'current.temperature_2m' manquant ou invalide");
     }
 
+    // Parsing de current.relative_humidity_2m
     if (hum_item && cJSON_IsNumber(hum_item))
     {
-        data->current.humidity = (float)hum_item->valuedouble;
+        float hum = (float)hum_item->valuedouble;
+        if (hum >= 0.0f && hum <= 100.0f)
+        {
+            data->current.humidity = hum;
+        }
+        else
+        {
+            ESP_LOGW(TAG, "Humidité invalide: %.1f%%", hum);
+            data->current.humidity = 0.0f;
+        }
     }
     else
     {
@@ -230,18 +701,7 @@ static esp_err_t parse_open_meteo_json(cJSON *root, weather_data_t *data)
         ESP_LOGW(TAG, "Champ 'current.relative_humidity_2m' manquant ou invalide");
     }
 
-    const char *desc = get_weather_description(data->current.weather_code);
-
-    snprintf(g_thermostat_runtime.desc_ext,
-             sizeof(g_thermostat_runtime.desc_ext),
-             "%s",
-             desc);
-
-    // Mise à jour du thermostat depuis CURRENT
-    thermostat_update_outdoor_data(data->current.temperature,
-                                   data->current.humidity,
-                                   desc);
-
+    // Parsing de current.weather_code
     if (code_item && cJSON_IsNumber(code_item))
     {
         data->current.weather_code = owm_to_openmeteo(code_item->valueint);
@@ -252,9 +712,19 @@ static esp_err_t parse_open_meteo_json(cJSON *root, weather_data_t *data)
         ESP_LOGW(TAG, "Champ 'current.weather_code' manquant ou invalide");
     }
 
+    // Parsing de current.surface_pressure
     if (press_item && cJSON_IsNumber(press_item))
     {
-        data->current.pressure = (float)press_item->valuedouble;
+        float press = (float)press_item->valuedouble;
+        if (press >= 800.0f && press <= 1100.0f)
+        {
+            data->current.pressure = press;
+        }
+        else
+        {
+            ESP_LOGW(TAG, "Pression invalide: %.1fhPa", press);
+            data->current.pressure = 0.0f;
+        }
     }
     else
     {
@@ -262,16 +732,16 @@ static esp_err_t parse_open_meteo_json(cJSON *root, weather_data_t *data)
         ESP_LOGW(TAG, "Champ 'current.surface_pressure' manquant ou invalide");
     }
 
-    // ESP_LOGI(TAG, "Parsing 'current' réussi : temp=%.1f°C, hum=%.1f%%, code=%d, pres=%.1fhPa",
-    //          data->current.temperature, data->current.humidity,
-    //          data->current.weather_code, data->current.pressure);
+    ESP_LOGI(TAG, "Parsing 'current' réussi : temp=%.1f°C, hum=%.1f%%, code=%d, pres=%.1fhPa",
+             data->current.temperature, data->current.humidity,
+             data->current.weather_code, data->current.pressure);
 
     // --- 2. Parsing du bloc HOURLY (48h) ---
     cJSON *hourly = cJSON_GetObjectItemCaseSensitive(root, "hourly");
     if (!hourly)
     {
         ESP_LOGE(TAG, "Bloc 'hourly' manquant");
-        return ESP_FAIL;
+        return ESP_ERR_INVALID_RESPONSE;
     }
 
     cJSON *t_arr = cJSON_GetObjectItemCaseSensitive(hourly, "temperature_2m");
@@ -281,7 +751,7 @@ static esp_err_t parse_open_meteo_json(cJSON *root, weather_data_t *data)
     if (!t_arr || !h_arr || !c_arr)
     {
         ESP_LOGE(TAG, "Un des tableaux hourly est manquant");
-        return ESP_FAIL;
+        return ESP_ERR_INVALID_RESPONSE;
     }
 
     int hourly_size = cJSON_GetArraySize(t_arr);
@@ -296,12 +766,7 @@ static esp_err_t parse_open_meteo_json(cJSON *root, weather_data_t *data)
         data->forecast_48h_code[i] = (c_item && cJSON_IsNumber(c_item)) ? c_item->valueint : 0;
     }
 
-    float temp_1h = (float)data->forecast_48h_temp[0];
-    float hum_1h = (float)data->forecast_48h_hum[0];
-    const char *desc_1h = get_weather_description(data->forecast_48h_code[0]);
-    thermostat_update_forecast_data(temp_1h, hum_1h, desc_1h);
-
-    // --- Parsing du bloc DAILY ---
+    // --- 3. Parsing du bloc DAILY ---
     cJSON *daily = cJSON_GetObjectItemCaseSensitive(root, "daily");
     if (daily)
     {
@@ -318,13 +783,17 @@ static esp_err_t parse_open_meteo_json(cJSON *root, weather_data_t *data)
                 cJSON *temp_item = cJSON_GetArrayItem(daily_temp_max, i);
                 cJSON *code_item = cJSON_GetArrayItem(daily_code, i);
 
-                // Conversion de la chaîne ISO 8601 en timestamp Unix
+                // Parsing de la date (format YYYY-MM-DD)
                 if (time_item && cJSON_IsString(time_item))
                 {
-                    struct tm tm = {0};
-                    if (strptime(time_item->valuestring, "%Y-%m-%d", &tm))
+                    int year, month, day;
+                    if (sscanf(time_item->valuestring, "%d-%d-%d", &year, &month, &day) == 3)
                     {
-                        data->forecast_7j[i].timestamp = mktime(&tm);
+                        struct tm tm = {0};
+                        tm.tm_year = year - 1900;
+                        tm.tm_mon = month - 1;
+                        tm.tm_mday = day;
+                        data->forecast_7j[i].timestamp = timegm(&tm); // UTC
                     }
                     else
                     {
@@ -337,16 +806,26 @@ static esp_err_t parse_open_meteo_json(cJSON *root, weather_data_t *data)
                     data->forecast_7j[i].timestamp = 0;
                 }
 
-                // Remplissage des autres champs
+                // Parsing de temperature_2m_max
                 if (temp_item && cJSON_IsNumber(temp_item))
                 {
-                    data->forecast_7j[i].temperature = (float)temp_item->valuedouble;
+                    float temp = (float)temp_item->valuedouble;
+                    if (temp >= -50.0f && temp <= 60.0f)
+                    {
+                        data->forecast_7j[i].temperature = temp;
+                    }
+                    else
+                    {
+                        ESP_LOGW(TAG, "Température daily invalide: %.1f°C", temp);
+                        data->forecast_7j[i].temperature = 0.0f;
+                    }
                 }
                 else
                 {
                     data->forecast_7j[i].temperature = 0.0f;
                 }
 
+                // Parsing de weather_code
                 if (code_item && cJSON_IsNumber(code_item))
                 {
                     data->forecast_7j[i].weather_code = code_item->valueint;
@@ -355,202 +834,248 @@ static esp_err_t parse_open_meteo_json(cJSON *root, weather_data_t *data)
                 {
                     data->forecast_7j[i].weather_code = 0;
                 }
-
-                // ESP_LOGI(TAG, "Daily[%d] : date=%s, timestamp=%ld, temp=%.1f°C, code=%d",
-                //          i, time_item->valuestring, data->forecast_7j[i].timestamp,
-                //          data->forecast_7j[i].temperature, data->forecast_7j[i].weather_code);
             }
         }
     }
 
-    // Synchronisation avec g_weather_data
-    memcpy(&g_weather_data, data, sizeof(weather_data_t));
     return ESP_OK;
 }
 
 // --- Weather Update (Main Function) ---
 esp_err_t weather_update(weather_data_t *data)
 {
+    char url[512];
+
     if (!data)
+    {
+        ESP_LOGE(TAG, "data est NULL");
         return ESP_ERR_INVALID_ARG;
+    }
+
+    // Vérifie si le cache est valide
+    if (weather_cache_is_valid())
+    {
+        memcpy(data, &s_cached_weather_data, sizeof(weather_data_t));
+        ESP_LOGI(TAG, "Utilisation des données météo en cache");
+        return ESP_OK;
+    }
+
     memset(data, 0, sizeof(weather_data_t));
 
-    // --- Try Open-Meteo ---
-    char url[512];
-    snprintf(url, sizeof(url),
-             "%s?latitude=%.5f&longitude=%.5f"
-             "&current=temperature_2m,relative_humidity_2m,weather_code,surface_pressure"
-             "&hourly=temperature_2m,relative_humidity_2m,weather_code&forecast_hours=48"
-             "&daily=weather_code,temperature_2m_max,relative_humidity_2m_max"
-             "&timezone=auto",
-             OPEN_METEO_URL, g_cfg.weather_lat, g_cfg.weather_lon);
+    // --- 1. Essayer Open-Meteo (avec réessais) ---
+    for (int attempt = 0; attempt < 3; attempt++)
+    { // 3 tentatives
+        char url[512];
+        snprintf(url, sizeof(url),
+                 "%s?latitude=%.5f&longitude=%.5f"
+                 "&current=temperature_2m,relative_humidity_2m,weather_code,surface_pressure"
+                 "&hourly=temperature_2m,relative_humidity_2m,weather_code&forecast_hours=48"
+                 "&daily=weather_code,temperature_2m_max,relative_humidity_2m_max"
+                 "&timezone=auto",
+                 OPEN_METEO_URL, CONFIG_WEATHER_LAT, CONFIG_WEATHER_LON);
 
-    if (http_get_to_buffer(url, 20000) == ESP_OK)
-    {
-        vTaskDelay(pdMS_TO_TICKS(10));
-        // ESP_LOGD(TAG, "Open-Meteo Response: %s", response_data);
-        cJSON *root = cJSON_ParseWithLength(response_data, weather_response_len);
-        vTaskDelay(pdMS_TO_TICKS(5));
-        if (root)
+        if (http_get_to_buffer(url, 10000) == ESP_OK && response_len > 0)
         {
-            if (parse_open_meteo_json(root, data) == ESP_OK)
+            cJSON *root = cJSON_ParseWithLength(response_buffer, response_len);
+            if (root)
             {
+                esp_err_t err = parse_open_meteo_json(root, data);
                 cJSON_Delete(root);
-                goto success;
+                if (err == ESP_OK)
+                {
+                    ESP_LOGI(TAG, "Open-Meteo: succès (attempt %d)", attempt + 1);
+                    goto success;
+                }
+                ESP_LOGW(TAG, "Open-Meteo: parsing échoué (attempt %d)", attempt + 1);
             }
-            cJSON_Delete(root);
+            else
+            {
+                ESP_LOGE(TAG, "Open-Meteo: JSON invalide (attempt %d)", attempt + 1);
+            }
         }
+        else
+        {
+            ESP_LOGW(TAG, "Open-Meteo: requête HTTP échouée (attempt %d)", attempt + 1);
+        }
+        vTaskDelay(pdMS_TO_TICKS(5000)); // Attend 5s avant réessai
     }
 
-    // --- Fallback: OpenWeatherMap ---
-    free(response_data);
-    response_data = NULL;
-    weather_response_len = 0;
-
-    ESP_LOGW(TAG, "Falling back to OpenWeatherMap");
-
-    // -------------------------
-    // 1) CURRENT WEATHER
-    // -------------------------
-    snprintf(url, sizeof(url),
-             "https://api.openweathermap.org/data/2.5/weather?lat=%.4f&lon=%.4f&appid=%s&units=metric",
-             g_cfg.weather_lat, g_cfg.weather_lon, OPEN_WEATHER_MAP_KEY);
-
-    if (http_get_to_buffer(url, 20000) != ESP_OK)
+    // --- 2. Fallback: OpenWeatherMap (Current + Forecast) ---
+    ESP_LOGW(TAG, "Fallback vers OpenWeatherMap");
+    for (int attempt = 0; attempt < 3; attempt++)
     {
-        vTaskDelay(pdMS_TO_TICKS(10));
-        ESP_LOGE(TAG, "OWM current: HTTP error");
-        goto fail;
-    }
+        // Current
+        snprintf(url, sizeof(url),
+                 "https://api.openweathermap.org/data/2.5/weather?lat=%.4f&lon=%.4f&appid=%s&units=metric",
+                 CONFIG_WEATHER_LAT, CONFIG_WEATHER_LON, CONFIG_OPEN_WEATHER_MAP_KEY);
 
-    cJSON *root_current = cJSON_ParseWithLength(response_data, weather_response_len);
-    vTaskDelay(pdMS_TO_TICKS(5));
-    if (!root_current)
-    {
-        ESP_LOGE(TAG, "OWM current: JSON parse error");
-        goto fail;
-    }
+        if (http_get_to_buffer(url, 10000) != ESP_OK || response_len == 0)
+        {
+            ESP_LOGE(TAG, "OWM Current: requête HTTP échouée (attempt %d)", attempt + 1);
+            vTaskDelay(pdMS_TO_TICKS(5000));
+            continue;
+        }
 
-    if (parse_owm_current(root_current, data) != ESP_OK)
-    {
-        ESP_LOGE(TAG, "OWM current: parsing failed");
+        cJSON *root_current = cJSON_ParseWithLength(response_buffer, response_len);
+        if (!root_current)
+        {
+            ESP_LOGE(TAG, "OWM Current: JSON invalide (attempt %d)", attempt + 1);
+            vTaskDelay(pdMS_TO_TICKS(5000));
+            continue;
+        }
+
+        if (parse_owm_current(root_current, data) != ESP_OK)
+        {
+            ESP_LOGE(TAG, "OWM Current: parsing échoué (attempt %d)", attempt + 1);
+            cJSON_Delete(root_current);
+            vTaskDelay(pdMS_TO_TICKS(5000));
+            continue;
+        }
         cJSON_Delete(root_current);
-        goto fail;
-    }
-    cJSON_Delete(root_current);
 
-    vTaskDelay(pdMS_TO_TICKS(50)); // évite WDT
+        // Forecast
+        snprintf(url, sizeof(url),
+                 "https://api.openweathermap.org/data/2.5/forecast?lat=%.4f&lon=%.4f&appid=%s&units=metric",
+                 CONFIG_WEATHER_LAT, CONFIG_WEATHER_LON, CONFIG_OPEN_WEATHER_MAP_KEY);
 
-    // -------------------------
-    // 2) FORECAST 48H + 7J (approx)
-    // -------------------------
-    free(response_data);
-    response_data = NULL;
-    weather_response_len = 0;
+        if (http_get_to_buffer(url, 10000) != ESP_OK || response_len == 0)
+        {
+            ESP_LOGE(TAG, "OWM Forecast: requête HTTP échouée (attempt %d)", attempt + 1);
+            vTaskDelay(pdMS_TO_TICKS(5000));
+            continue;
+        }
 
-    snprintf(url, sizeof(url),
-             "https://api.openweathermap.org/data/2.5/forecast?lat=%.4f&lon=%.4f&appid=%s&units=metric",
-             g_cfg.weather_lat, g_cfg.weather_lon, OPEN_WEATHER_MAP_KEY);
+        cJSON *root_forecast = cJSON_ParseWithLength(response_buffer, response_len);
+        if (!root_forecast)
+        {
+            ESP_LOGE(TAG, "OWM Forecast: JSON invalide (attempt %d)", attempt + 1);
+            vTaskDelay(pdMS_TO_TICKS(5000));
+            continue;
+        }
 
-    if (http_get_to_buffer(url, 30000) != ESP_OK)
-    {
-        vTaskDelay(pdMS_TO_TICKS(10));
-        ESP_LOGE(TAG, "OWM forecast: HTTP error");
-        goto fail;
-    }
-
-    cJSON *root_forecast = cJSON_ParseWithLength(response_data, weather_response_len);
-    vTaskDelay(pdMS_TO_TICKS(5));
-    if (!root_forecast)
-    {
-        ESP_LOGE(TAG, "OWM forecast: JSON parse error");
-        goto fail;
-    }
-
-    if (parse_owm_forecast(root_forecast, data) != ESP_OK)
-    {
-        ESP_LOGE(TAG, "OWM forecast: parsing failed");
+        if (parse_owm_forecast(root_forecast, data) != ESP_OK)
+        {
+            ESP_LOGE(TAG, "OWM Forecast: parsing échoué (attempt %d)", attempt + 1);
+            cJSON_Delete(root_forecast);
+            vTaskDelay(pdMS_TO_TICKS(5000));
+            continue;
+        }
         cJSON_Delete(root_forecast);
-        goto fail;
-    }
-
-    cJSON_Delete(root_forecast);
-    goto success;
-
-fail:
-    ESP_LOGE(TAG, "OpenWeatherMap fallback failed");
-    return ESP_FAIL;
-
-    // --- Fallback: Jeedom ---
-    free(response_data);
-    response_data = NULL;
-    weather_response_len = 0;
-
-    ESP_LOGW(TAG, "Falling back to Jeedom");
-    if (http_get_to_buffer(JEEDOM_URL, 3000) == ESP_OK && response_data && response_data[0] != '<')
-    {
-        vTaskDelay(pdMS_TO_TICKS(10));
-        data->current.jee_temp = atof(response_data);
-        data->current.weather_code = 0; // Default to clear sky
-        // Mettre à jour latest_weather aussi
-        latest_weather.current.jee_temp = data->current.jee_temp;
+        ESP_LOGI(TAG, "OpenWeatherMap: succès (attempt %d)", attempt + 1);
         goto success;
     }
 
-    // --- All fallbacks failed ---
-    alert_add("Absence METEO");
-    free(response_data);
-    response_data = NULL;
-    weather_response_len = 0;
+    // --- Toutes les sources ont échoué ---
+    ESP_LOGE(TAG, "Toutes les sources météo ont échoué");
     return ESP_FAIL;
 
 success:
-    // Copy data to global variable
-    memcpy(&g_weather_data, data, sizeof(weather_data_t));
+    // Sauvegarde dans le magasin de stockage
     weather_store_set_all(data);
+    // Met à jour le cache
+    weather_cache_update(data);
 
-    // Free response data
-    free(response_data);
-    response_data = NULL;
-    weather_response_len = 0;
+    // Publie un événement EVENT_WEATHER_UPDATE (toutes les données)
+    event_t event;
+    event.type = EVENT_WEATHER_UPDATE;
+    event.priority = EVENT_PRIO_NORMAL;
+    event.timestamp_ms = xTaskGetTickCount() * portTICK_PERIOD_MS;
+    event.payload.payload_ptr = (void *)data;
+    event.payload.payload_len = sizeof(weather_data_t);
+    if (!event_bus_publish(&event)) {
+        ESP_LOGE(TAG, "Échec de la publication de EVENT_WEATHER_UPDATE");
+    }
 
-    // Sauvegarde dans le magasin de stockage local
-    weather_store_set_all(data);
-
-    // Mettre aussi à jour latest_weather pour les getters/UI
-    latest_weather = *data;
+    // ✅ Publie EVENT_WEATHER_HOURLY avec les données de la première heure
+    // Utilise data->forecast_48h_temp[0] et data->forecast_48h_hum[0] pour l'heure actuelle
+    if (data->forecast_48h_temp[0] != 0.0f || data->forecast_48h_hum[0] != 0.0f) {
+        if (!weather_publish_hourly(
+                data->forecast_48h_temp[0],  // Température pour l'heure actuelle
+                data->forecast_48h_hum[0],   // Humidité pour l'heure actuelle
+                data->forecast_48h_code[0]   // Code météo pour l'heure actuelle
+            )) {
+            ESP_LOGE(TAG, "Échec de la publication de EVENT_WEATHER_HOURLY");
+        }
+    } else {
+        ESP_LOGW(TAG, "Données horaires invalides (0.0), EVENT_WEATHER_HOURLY non publié");
+    }
 
     return ESP_OK;
 }
 
-// --- Generate JSON from weather_data_t ---
+// --- JSON Generation ---
 static char *weather_to_json(const weather_data_t *data)
 {
     if (!data)
+    {
+        ESP_LOGE(TAG, "data est NULL");
         return NULL;
+    }
 
     cJSON *root = cJSON_CreateObject();
     if (!root)
+    {
+        ESP_LOGE(TAG, "Échec de la création de l'objet JSON racine");
         return NULL;
+    }
 
     // --- Section "now" ---
     cJSON *now = cJSON_AddObjectToObject(root, "now");
     if (!now)
     {
+        ESP_LOGE(TAG, "Échec de l'ajout de l'objet 'now'");
         cJSON_Delete(root);
         return NULL;
     }
-    cJSON_AddNumberToObject(now, "temp", data->current.temperature);
-    cJSON_AddNumberToObject(now, "hum", data->current.humidity);
-    cJSON_AddStringToObject(now, "desc", get_weather_description(data->current.weather_code));
-    cJSON_AddNumberToObject(now, "time", (double)data->current.timestamp);
-    cJSON_AddNumberToObject(now, "jee_temp", data->current.jee_temp);
-    cJSON_AddNumberToObject(now, "pres", data->current.pressure);
+
+    // Ajout des champs avec validation
+    float temp = (data->current.temperature >= -50.0f && data->current.temperature <= 60.0f)
+                     ? data->current.temperature
+                     : 0.0f;
+    if (!cJSON_AddNumberToObject(now, "temp", temp))
+    {
+        ESP_LOGE(TAG, "Échec de l'ajout de 'now.temp'");
+        cJSON_Delete(root);
+        return NULL;
+    }
+
+    float hum = (data->current.humidity >= 0.0f && data->current.humidity <= 100.0f)
+                    ? data->current.humidity
+                    : 0.0f;
+    if (!cJSON_AddNumberToObject(now, "hum", hum))
+    {
+        ESP_LOGE(TAG, "Échec de l'ajout de 'now.hum'");
+        cJSON_Delete(root);
+        return NULL;
+    }
+
+    const char *desc = get_weather_description(data->current.weather_code);
+    if (!cJSON_AddStringToObject(now, "desc", desc))
+    {
+        ESP_LOGE(TAG, "Échec de l'ajout de 'now.desc'");
+        cJSON_Delete(root);
+        return NULL;
+    }
+
+    if (!cJSON_AddNumberToObject(now, "time", (double)data->current.timestamp))
+    {
+        ESP_LOGE(TAG, "Échec de l'ajout de 'now.time'");
+        cJSON_Delete(root);
+        return NULL;
+    }
+
+    if (!cJSON_AddNumberToObject(now, "pres", data->current.pressure))
+    {
+        ESP_LOGE(TAG, "Échec de l'ajout de 'now.pres'");
+        cJSON_Delete(root);
+        return NULL;
+    }
 
     // --- Section "f48_temps" (tableau de 48 floats) ---
     cJSON *f48_temps = cJSON_AddArrayToObject(root, "f48_temps");
     if (!f48_temps)
     {
+        ESP_LOGE(TAG, "Échec de l'ajout du tableau 'f48_temps'");
         cJSON_Delete(root);
         return NULL;
     }
@@ -559,16 +1084,24 @@ static char *weather_to_json(const weather_data_t *data)
         cJSON *num = cJSON_CreateNumber(data->forecast_48h_temp[i]);
         if (!num)
         {
+            ESP_LOGE(TAG, "Échec de la création du nombre pour f48_temps[%d]", i);
             cJSON_Delete(root);
             return NULL;
         }
-        cJSON_AddItemToArray(f48_temps, num);
+        if (!cJSON_AddItemToArray(f48_temps, num))
+        {
+            ESP_LOGE(TAG, "Échec de l'ajout de f48_temps[%d]", i);
+            cJSON_Delete(num);
+            cJSON_Delete(root);
+            return NULL;
+        }
     }
 
     // --- Section "f48_hums" (tableau de 48 floats) ---
     cJSON *f48_hums = cJSON_AddArrayToObject(root, "f48_hums");
     if (!f48_hums)
     {
+        ESP_LOGE(TAG, "Échec de l'ajout du tableau 'f48_hums'");
         cJSON_Delete(root);
         return NULL;
     }
@@ -577,20 +1110,24 @@ static char *weather_to_json(const weather_data_t *data)
         cJSON *num = cJSON_CreateNumber(data->forecast_48h_hum[i]);
         if (!num)
         {
+            ESP_LOGE(TAG, "Échec de la création du nombre pour f48_hums[%d]", i);
             cJSON_Delete(root);
             return NULL;
         }
-        cJSON_AddItemToArray(f48_hums, num);
+        if (!cJSON_AddItemToArray(f48_hums, num))
+        {
+            ESP_LOGE(TAG, "Échec de l'ajout de f48_hums[%d]", i);
+            cJSON_Delete(num);
+            cJSON_Delete(root);
+            return NULL;
+        }
     }
-
-    g_thermostat_runtime.temp_ext = data->current.temperature;
-    g_thermostat_runtime.humidity_ext = data->current.humidity;
-    g_thermostat_runtime.temp_forecast_1h = data->forecast_48h_temp[1];
 
     // --- Section "f7j" (7 jours) ---
     cJSON *f7j = cJSON_AddArrayToObject(root, "f7j");
     if (!f7j)
     {
+        ESP_LOGE(TAG, "Échec de l'ajout du tableau 'f7j'");
         cJSON_Delete(root);
         return NULL;
     }
@@ -600,42 +1137,75 @@ static char *weather_to_json(const weather_data_t *data)
         cJSON *day_obj = cJSON_CreateObject();
         if (!day_obj)
         {
+            ESP_LOGE(TAG, "Échec de la création de l'objet day[%d]", i);
             cJSON_Delete(root);
             return NULL;
         }
 
-        // Ajoute le jour de la semaine (ex: "jeu. 5")
-        char day_str[16];
+        // Gestion du timestamp et du jour
+        char day_str[16] = "Inconnu";
         if (data->forecast_7j[i].timestamp != 0)
         {
-            // Conversion explicite de long en time_t pour localtime
             time_t temp_time = (time_t)data->forecast_7j[i].timestamp;
-            struct tm *tm = localtime(&temp_time);
-            if (tm)
+            struct tm tm;
+            if (localtime_r(&temp_time, &tm))
             {
-                strftime(day_str, sizeof(day_str), "%a. %d", tm); // "jeu. 5"
-            }
-            else
-            {
-                strcpy(day_str, "Inconnu");
+                strftime(day_str, sizeof(day_str), "%a. %d", &tm);
             }
         }
-        else
+
+        if (!cJSON_AddStringToObject(day_obj, "day", day_str))
         {
-            strcpy(day_str, "Inconnu");
+            ESP_LOGE(TAG, "Échec de l'ajout de 'day[%d].day'", i);
+            cJSON_Delete(day_obj);
+            cJSON_Delete(root);
+            return NULL;
         }
-        cJSON_AddStringToObject(day_obj, "day", day_str);
 
-        // Ajoute les autres champs
-        cJSON_AddNumberToObject(day_obj, "temp", data->forecast_7j[i].temperature);
-        cJSON_AddStringToObject(day_obj, "desc", get_weather_description(data->forecast_7j[i].weather_code));
-        cJSON_AddNumberToObject(day_obj, "time", (double)data->forecast_7j[i].timestamp);
+        // Ajout des autres champs avec validation
+        float temp_7j = (data->forecast_7j[i].temperature >= -50.0f && data->forecast_7j[i].temperature <= 60.0f)
+                            ? data->forecast_7j[i].temperature
+                            : 0.0f;
+        if (!cJSON_AddNumberToObject(day_obj, "temp", temp_7j))
+        {
+            ESP_LOGE(TAG, "Échec de l'ajout de 'day[%d].temp'", i);
+            cJSON_Delete(day_obj);
+            cJSON_Delete(root);
+            return NULL;
+        }
 
-        cJSON_AddItemToArray(f7j, day_obj);
+        const char *desc_7j = get_weather_description(data->forecast_7j[i].weather_code);
+        if (!cJSON_AddStringToObject(day_obj, "desc", desc_7j))
+        {
+            ESP_LOGE(TAG, "Échec de l'ajout de 'day[%d].desc'", i);
+            cJSON_Delete(day_obj);
+            cJSON_Delete(root);
+            return NULL;
+        }
+
+        if (!cJSON_AddNumberToObject(day_obj, "time", (double)data->forecast_7j[i].timestamp))
+        {
+            ESP_LOGE(TAG, "Échec de l'ajout de 'day[%d].time'", i);
+            cJSON_Delete(day_obj);
+            cJSON_Delete(root);
+            return NULL;
+        }
+
+        if (!cJSON_AddItemToArray(f7j, day_obj))
+        {
+            ESP_LOGE(TAG, "Échec de l'ajout de day[%d] au tableau", i);
+            cJSON_Delete(day_obj);
+            cJSON_Delete(root);
+            return NULL;
+        }
     }
 
     // Génère la chaîne JSON
     char *json_str = cJSON_PrintUnformatted(root);
+    if (!json_str)
+    {
+        ESP_LOGE(TAG, "Échec de la sérialisation JSON");
+    }
     cJSON_Delete(root);
     return json_str;
 }
@@ -643,48 +1213,100 @@ static char *weather_to_json(const weather_data_t *data)
 // --- Public Functions ---
 char *weather_generate_json(void)
 {
-    return weather_to_json(&g_weather_data);
+    if (xSemaphoreTake(g_weather_mutex, pdMS_TO_TICKS(100)) == pdTRUE)
+    {
+        char *json = weather_to_json(&g_weather_data);
+        xSemaphoreGive(g_weather_mutex);
+        return json;
+    }
+    return NULL;
 }
 
 float temperature_get_outdoor(void)
 {
-    return g_weather_data.current.jee_temp;
+    if (xSemaphoreTake(g_weather_mutex, pdMS_TO_TICKS(100)) == pdTRUE)
+    {
+        float temp = g_weather_data.current.meteo_valid ? g_weather_data.current.temperature : 0.0f;
+        xSemaphoreGive(g_weather_mutex);
+        return temp;
+    }
+    return 0.0f;
 }
 
 bool temperature_get_valid(void)
 {
-    return g_weather_data.current.meteo_valid;
+    if (xSemaphoreTake(g_weather_mutex, pdMS_TO_TICKS(100)) == pdTRUE)
+    {
+        bool valid = g_weather_data.current.meteo_valid;
+        xSemaphoreGive(g_weather_mutex);
+        return valid;
+    }
+    return false;
 }
 
 void temperature_set_valid(bool result)
 {
-    g_weather_data.current.meteo_valid = result;
+    if (xSemaphoreTake(g_weather_mutex, pdMS_TO_TICKS(100)) == pdTRUE)
+    {
+        g_weather_data.current.meteo_valid = result;
+        xSemaphoreGive(g_weather_mutex);
+    }
 }
 
 float weather_get_forecast_temp(int hours)
 {
     if (hours < 0 || hours >= 48)
+    {
         return 0.0f;
-    return g_weather_data.forecast_48h_temp[hours];
+    }
+    if (xSemaphoreTake(g_weather_mutex, pdMS_TO_TICKS(100)) == pdTRUE)
+    {
+        float temp = g_weather_data.forecast_48h_temp[hours];
+        xSemaphoreGive(g_weather_mutex);
+        return temp;
+    }
+    return 0.0f;
 }
 
 float weather_get_forecast_humidity(int hours)
 {
     if (hours < 0 || hours >= 48)
+    {
         return 0.0f;
-    return g_weather_data.forecast_48h_hum[hours];
+    }
+    if (xSemaphoreTake(g_weather_mutex, pdMS_TO_TICKS(100)) == pdTRUE)
+    {
+        float hum = g_weather_data.forecast_48h_hum[hours];
+        xSemaphoreGive(g_weather_mutex);
+        return hum;
+    }
+    return 0.0f;
 }
 
 int weather_get_current_code(void)
 {
-    return g_weather_data.current.weather_code;
+    if (xSemaphoreTake(g_weather_mutex, pdMS_TO_TICKS(100)) == pdTRUE)
+    {
+        int code = g_weather_data.current.weather_code;
+        xSemaphoreGive(g_weather_mutex);
+        return code;
+    }
+    return 0;
 }
 
 int weather_get_forecast_code(int hours)
 {
     if (hours < 0 || hours >= 48)
-        return g_weather_data.current.weather_code;
-    return g_weather_data.forecast_48h_code[hours];
+    {
+        return weather_get_current_code();
+    }
+    if (xSemaphoreTake(g_weather_mutex, pdMS_TO_TICKS(100)) == pdTRUE)
+    {
+        int code = g_weather_data.forecast_48h_code[hours];
+        xSemaphoreGive(g_weather_mutex);
+        return code;
+    }
+    return weather_get_current_code();
 }
 
 esp_err_t weather_get_temp_in_x_hours(const weather_data_t *data, int hours_from_now, float *out_temp)
@@ -697,77 +1319,61 @@ esp_err_t weather_get_temp_in_x_hours(const weather_data_t *data, int hours_from
     return ESP_OK;
 }
 
-// --- Task for Manual Update ---
-void weather_update_task_manually(void *arg)
-{
-    esp_task_wdt_reset();
-    weather_data_t *tmp = calloc(1, sizeof(weather_data_t));
-    if (tmp)
-    {
-        if (weather_update(tmp) == ESP_OK)
-        {
-            // ESP_LOGI(TAG, "Manual weather update successful");
-        }
-        else
-        {
-            ESP_LOGE(TAG, "Manual weather update failed");
-        }
-        free(tmp);
-    }
-    esp_task_wdt_delete(NULL);
-    vTaskDelete(NULL);
-}
-
 // --- Geocoding ---
 esp_err_t weather_geocode_city(const char *city, double *lat, double *lon)
 {
     if (!city || !lat || !lon)
+    {
+        ESP_LOGE(TAG, "city, lat ou lon est NULL");
         return ESP_ERR_INVALID_ARG;
+    }
 
-    char encoded_city[64] = {0};
+    // Encodage URL de la ville (remplace les espaces par %20)
+    char encoded_city[64];
     int j = 0;
-    for (int i = 0; city[i] != '\0' && j < sizeof(encoded_city) - 4; i++)
+    for (int i = 0; city[i] != '\0' && j < sizeof(encoded_city) - 1; i++)
     {
         if (city[i] == ' ')
         {
-            strcat(encoded_city, "%20");
-            j += 3;
+            if (j + 3 >= sizeof(encoded_city))
+                break;
+            encoded_city[j++] = '%';
+            encoded_city[j++] = '2';
+            encoded_city[j++] = '0';
         }
         else
         {
             encoded_city[j++] = city[i];
         }
     }
+    encoded_city[j] = '\0';
 
+    // Requête HTTP
     char url[256];
-    snprintf(url, sizeof(url), "https://geocoding-api.open-meteo.com/v1/search?name=%s&count=1&language=fr&format=json", encoded_city);
+    snprintf(url, sizeof(url),
+             "https://geocoding-api.open-meteo.com/v1/search?name=%s&count=1&language=fr&format=json",
+             encoded_city);
 
-    if (http_get_to_buffer(url, 20000) != ESP_OK || !response_data)
+    esp_err_t err = http_get_to_buffer(url, 20000);
+    if (err != ESP_OK || response_len == 0)
     {
-        vTaskDelay(pdMS_TO_TICKS(10));
-        free(response_data);
-        response_data = NULL;
-        weather_response_len = 0;
+        ESP_LOGE(TAG, "Requête HTTP échouée (%s)", esp_err_to_name(err));
         return ESP_FAIL;
     }
 
-    esp_task_wdt_reset();
-    cJSON *root = cJSON_Parse(response_data);
+    // Parsing JSON
+    cJSON *root = cJSON_ParseWithLength(response_buffer, response_len);
     if (!root)
     {
-        free(response_data);
-        response_data = NULL;
-        weather_response_len = 0;
+        ESP_LOGE(TAG, "Échec du parsing JSON");
         return ESP_FAIL;
     }
 
     cJSON *results = cJSON_GetObjectItem(root, "results");
     if (!cJSON_IsArray(results) || cJSON_GetArraySize(results) == 0)
     {
+        ESP_LOGE(TAG, "Aucun résultat trouvé");
         cJSON_Delete(root);
-        free(response_data);
-        response_data = NULL;
-        weather_response_len = 0;
         return ESP_FAIL;
     }
 
@@ -776,324 +1382,43 @@ esp_err_t weather_geocode_city(const char *city, double *lat, double *lon)
     {
         cJSON *lat_item = cJSON_GetObjectItem(item, "latitude");
         cJSON *lon_item = cJSON_GetObjectItem(item, "longitude");
-        if (lat_item)
+        if (lat_item && cJSON_IsNumber(lat_item))
+        {
             *lat = lat_item->valuedouble;
-        if (lon_item)
+        }
+        else
+        {
+            *lat = 0.0;
+        }
+        if (lon_item && cJSON_IsNumber(lon_item))
+        {
             *lon = lon_item->valuedouble;
+        }
+        else
+        {
+            *lon = 0.0;
+        }
+    }
+    else
+    {
+        *lat = 0.0;
+        *lon = 0.0;
     }
 
     cJSON_Delete(root);
-    free(response_data);
-    response_data = NULL;
-    weather_response_len = 0;
-    esp_task_wdt_reset();
     return ESP_OK;
 }
 
-static esp_err_t parse_owm_current(cJSON *root, weather_data_t *data)
+// --- Event Bus Integration ---
+bool weather_publish_hourly(float temperature, float humidity, int weather_code)
 {
-    if (!root || !data)
-        return ESP_FAIL;
-
-    cJSON *main = cJSON_GetObjectItem(root, "main");
-    if (!main)
-    {
-        ESP_LOGE(TAG, "OWM current: 'main' missing");
-        return ESP_FAIL;
-    }
-
-    cJSON *temp = cJSON_GetObjectItem(main, "temp");
-    cJSON *hum = cJSON_GetObjectItem(main, "humidity");
-    cJSON *pres = cJSON_GetObjectItem(main, "pressure");
-
-    if (cJSON_IsNumber(temp))
-        data->current.temperature = temp->valuedouble;
-
-    if (cJSON_IsNumber(hum))
-        data->current.humidity = hum->valuedouble;
-
-    if (cJSON_IsNumber(pres))
-        data->current.pressure = pres->valuedouble;
-
-    // Weather code
-    cJSON *weather = cJSON_GetObjectItem(root, "weather");
-    if (cJSON_IsArray(weather))
-    {
-        cJSON *w0 = cJSON_GetArrayItem(weather, 0);
-        if (w0)
-        {
-            cJSON *id = cJSON_GetObjectItem(w0, "id");
-            if (cJSON_IsNumber(id))
-            {
-                int owm_code = id->valueint;
-                data->current.weather_code = owm_to_openmeteo(owm_code);
-            }
-        }
-    }
-
-    data->current.timestamp = time(NULL);
-    data->current.meteo_valid = true;
-
-    return ESP_OK;
-}
-
-static esp_err_t parse_owm_forecast(cJSON *root, weather_data_t *data)
-{
-    if (!root || !data)
-        return ESP_FAIL;
-
-    cJSON *list = cJSON_GetObjectItem(root, "list");
-    if (!cJSON_IsArray(list))
-        return ESP_FAIL;
-
-    int count = cJSON_GetArraySize(list);
-    int limit48 = MIN(count, 16);
-
-    float temp3h[16] = {0};
-    float hum3h[16] = {0};
-    int code3h[16] = {0};
-
-    // -------------------------
-    // Extraction des points OWM (3h)
-    // -------------------------
-    for (int i = 0; i < limit48; i++)
-    {
-        cJSON *entry = cJSON_GetArrayItem(list, i);
-        if (!entry)
-            continue;
-
-        cJSON *main = cJSON_GetObjectItem(entry, "main");
-        if (!main)
-            continue;
-
-        cJSON *t = cJSON_GetObjectItem(main, "temp");
-        cJSON *h = cJSON_GetObjectItem(main, "humidity");
-
-        if (cJSON_IsNumber(t))
-            temp3h[i] = t->valuedouble;
-        if (cJSON_IsNumber(h))
-            hum3h[i] = h->valuedouble;
-
-        cJSON *weather = cJSON_GetObjectItem(entry, "weather");
-        if (cJSON_IsArray(weather))
-        {
-            cJSON *w0 = cJSON_GetArrayItem(weather, 0);
-            if (w0)
-            {
-                cJSON *id = cJSON_GetObjectItem(w0, "id");
-                if (cJSON_IsNumber(id))
-                    code3h[i] = owm_to_openmeteo(id->valueint);
-            }
-        }
-    }
-
-    // -------------------------
-    // Interpolation → 48 points horaires
-    // -------------------------
-    interpolate_48h_safe(temp3h, hum3h, code3h, limit48,
-                         data->forecast_48h_temp,
-                         data->forecast_48h_hum,
-                         data->forecast_48h_code);
-
-    vTaskDelay(pdMS_TO_TICKS(2));
-    data->forecast_48h.temperature = data->forecast_48h_temp[47];
-    data->forecast_48h.humidity = data->forecast_48h_hum[47];
-    data->forecast_48h.timestamp = data->current.timestamp + (47 * 3600);
-
-    // -------------------------
-    // Prévisions 7 jours (point le plus proche de midi)
-    // -------------------------
-    time_t now = data->current.timestamp;
-    struct tm tm_now;
-    localtime_r(&now, &tm_now);
-
-    for (int d = 0; d < 7; d++)
-    {
-        struct tm target = tm_now;
-        target.tm_mday += (d + 1);
-        target.tm_hour = 12;
-        target.tm_min = 0;
-        target.tm_sec = 0;
-
-        time_t target_ts = mktime(&target);
-
-        int best_idx = 0;
-        long best_diff = LONG_MAX;
-
-        for (int i = 0; i < count; i++)
-        {
-            cJSON *entry = cJSON_GetArrayItem(list, i);
-            if (!entry)
-                continue;
-
-            cJSON *dt = cJSON_GetObjectItem(entry, "dt");
-            if (!cJSON_IsNumber(dt))
-                continue;
-
-            long ts = dt->valueint;
-            long long ts_ll = (long long)ts;
-            long long target_ll = (long long)target_ts;
-            long long diff = llabs(ts_ll - target_ll);
-
-            if (diff < best_diff)
-            {
-                best_diff = diff;
-                best_idx = i;
-            }
-            if ((i & 3) == 0)
-                vTaskDelay(1); // toutes les 4 itérations
-        }
-
-        cJSON *entry = cJSON_GetArrayItem(list, best_idx);
-        if (!entry)
-            continue;
-
-        cJSON *main = cJSON_GetObjectItem(entry, "main");
-        if (!main)
-            continue;
-
-        cJSON *t = cJSON_GetObjectItem(main, "temp");
-        if (cJSON_IsNumber(t))
-            data->forecast_7j[d].temperature = t->valuedouble;
-
-        cJSON *weather = cJSON_GetObjectItem(entry, "weather");
-        if (cJSON_IsArray(weather))
-        {
-            cJSON *w0 = cJSON_GetArrayItem(weather, 0);
-            if (w0)
-            {
-                cJSON *id = cJSON_GetObjectItem(w0, "id");
-                if (cJSON_IsNumber(id))
-                    data->forecast_7j[d].weather_code = owm_to_openmeteo(id->valueint);
-            }
-        }
-
-        cJSON *dt = cJSON_GetObjectItem(entry, "dt");
-        if (cJSON_IsNumber(dt))
-            data->forecast_7j[d].timestamp = dt->valueint;
-    }
-
-    return ESP_OK;
-}
-
-static void interpolate_48h_safe(float *src_temp, float *src_hum, int *src_code,
-                                 int src_count,
-                                 float *dst_temp, float *dst_hum, int *dst_code)
-{
-    if (src_count < 2)
-    {
-        float t = src_temp[0];
-        float h = src_hum[0];
-        int c = src_code[0];
-
-        for (int i = 0; i < 48; i++)
-        {
-            dst_temp[i] = t;
-            dst_hum[i] = h;
-            dst_code[i] = c;
-        }
-        return;
-    }
-
-    int segments = src_count - 1;
-    float hours_per_segment = 48.0f / segments;
-
-    int idx = 0;
-
-    for (int s = 0; s < segments; s++)
-    {
-        float t0 = src_temp[s];
-        float t1 = src_temp[s + 1];
-
-        float h0 = src_hum[s];
-        float h1 = src_hum[s + 1];
-
-        int c0 = src_code[s];
-
-        int steps = (int)hours_per_segment;
-
-        for (int h = 0; h < steps && idx < 48; h++)
-        {
-            float k = (float)h / (float)steps;
-
-            dst_temp[idx] = t0 + (t1 - t0) * k;
-            dst_hum[idx] = h0 + (h1 - h0) * k;
-            dst_code[idx] = c0;
-
-            idx++;
-        }
-    }
-
-    float t = src_temp[src_count - 1];
-    float h = src_hum[src_count - 1];
-    int c = src_code[src_count - 1];
-
-    while (idx < 48)
-    {
-        dst_temp[idx] = t;
-        dst_hum[idx] = h;
-        dst_code[idx] = c;
-        idx++;
-    }
-}
-
-static int owm_to_openmeteo(int owm)
-{
-    // Thunderstorm
-    if (owm >= 200 && owm <= 232)
-        return 95;
-
-    // Drizzle
-    if (owm >= 300 && owm <= 321)
-        return 51;
-
-    // Rain
-    if (owm >= 500 && owm <= 504)
-        return 61;
-    if (owm == 511)
-        return 67; // pluie verglaçante
-    if (owm >= 520 && owm <= 531)
-        return 80;
-
-    // Snow
-    if (owm >= 600 && owm <= 602)
-        return 71;
-    if (owm >= 611 && owm <= 616)
-        return 73;
-    if (owm >= 620 && owm <= 622)
-        return 75;
-
-    // Atmosphere
-    if (owm == 701)
-        return 45;
-    if (owm == 711)
-        return 45;
-    if (owm == 721)
-        return 45;
-    if (owm == 731 || owm == 751 || owm == 761)
-        return 45;
-    if (owm == 741)
-        return 45;
-    if (owm == 762)
-        return 45;
-    if (owm == 771)
-        return 80;
-    if (owm == 781)
-        return 99;
-
-    // Clear
-    if (owm == 800)
-        return 0;
-
-    // Clouds
-    if (owm == 801)
-        return 1;
-    if (owm == 802)
-        return 2;
-    if (owm == 803)
-        return 3;
-    if (owm == 804)
-        return 3;
-
-    return 3; // fallback: couvert
+    event_t event;
+    event.type = EVENT_WEATHER_HOURLY;
+    event.priority = EVENT_PRIO_NORMAL;
+    event.timestamp_ms = xTaskGetTickCount() * portTICK_PERIOD_MS;
+    event.weather_hourly.temperature = temperature;
+    event.weather_hourly.humidity = humidity;
+    event.weather_hourly.weather_code = weather_code;
+    ESP_LOGI(TAG, "Publication de EVENT_WEATHER_HOURLY");
+    return event_bus_publish(&event);
 }

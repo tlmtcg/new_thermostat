@@ -14,6 +14,7 @@
 #include "wifi_app.h"
 #include "nvs_flash.h"
 #include "time_manager.h"
+#include "weather.h"
 
 static const char *TAG = "system_manager";
 
@@ -23,20 +24,23 @@ EventGroupHandle_t g_app_event_group = NULL;
 void system_manager_start(void)
 {
     ESP_LOGI(TAG, "System start");
+    // Augmente le niveau de log pour afficher les logs DEBUG
+    esp_log_level_set("THERMOSTAT", ESP_LOG_DEBUG);
 
     // 0. Initialiser le NVS (indispensable)
     esp_err_t ret = nvs_flash_init();
-    if (ret == ESP_ERR_NVS_NO_FREE_PAGES || ret == ESP_ERR_NVS_NEW_VERSION_FOUND) {
+    if (ret == ESP_ERR_NVS_NO_FREE_PAGES || ret == ESP_ERR_NVS_NEW_VERSION_FOUND)
+    {
         ESP_ERROR_CHECK(nvs_flash_erase());
         ret = nvs_flash_init();
     }
     ESP_ERROR_CHECK(ret);
 
     // Initialiser time_manager
-    if (time_manager_init() == ESP_OK) {
+    if (time_manager_init() == ESP_OK)
+    {
         ESP_LOGI("MAIN", "Temps initialisé avec succès");
     }
-
 
     // ---------------------------------------------------------------------
     // 1. BASE SYSTEM
@@ -96,7 +100,7 @@ void system_manager_start(void)
     // 5. THERMOSTAT INIT & START TASK SYSTEM (RTOS)
     // ---------------------------------------------------------------------
     ESP_LOGI(TAG, "Init Thermostat core");
-    
+
     // Initialise le calendrier (NVS) et crée l'UNIQUE instance de thermostat_task
     err = thermostat_init();
     if (err != ESP_OK)
@@ -104,7 +108,7 @@ void system_manager_start(void)
         ESP_LOGE(TAG, "Thermostat init failed: %s", esp_err_to_name(err));
     }
 
-    // IMPORTANT : Ouvre ton fichier "tasks.c" et assure-toi que la fonction 
+    // IMPORTANT : Ouvre ton fichier "tasks.c" et assure-toi que la fonction
     // tasks_start() NE contient PLUS d'appel à xTaskCreate pour thermostat_task.
     tasks_start();
 
@@ -129,8 +133,7 @@ void system_manager_start(void)
     oled_task_config_t oled_config = {
         .event_group = g_app_event_group,
         .event_bit = BIT(0),
-        .refresh_interval_ms = 500
-    };
+        .refresh_interval_ms = 500};
 
     ESP_LOGI(TAG, "Starting OLED service");
 
@@ -139,6 +142,8 @@ void system_manager_start(void)
     {
         ESP_LOGE(TAG, "OLED start failed: %s", esp_err_to_name(err));
     }
+
+    weather_init();
 
     // ---------------------------------------------------------------------
     // 7. ACTIVATE SYSTEM
@@ -198,7 +203,7 @@ void system_manager_start(void)
 //     tasks_start(); // Thermostat et logique métier
 
 //     // 6. Lancement final : WiFi et Capteurs
-//     // Le WiFi démarrera, et dans son handler (IP_EVENT_STA_GOT_IP), 
+//     // Le WiFi démarrera, et dans son handler (IP_EVENT_STA_GOT_IP),
 //     // il déclenchera time_manager_start_sntp() via l'event bus ou appel direct.
 //     wifi_app_start();
 
