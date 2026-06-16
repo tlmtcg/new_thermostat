@@ -74,12 +74,6 @@ g_sensor_running - État du service capteur
 font5x7[][] - Tableau de polices 5x7
 Les variables marquées avec extern sont déclarées globalement mais initialisées dans d'autres fichiers. Les variables static sont locales au fichier.
 
-Doublons
-Dans sht31_task.c et dans dht_task.c:
-
-static float last_published_temp = NAN;
-static float last_published_hum = NAN;
-static uint32_t last_publish_ms = 0;
 
 Dans thermostat_task.c,
 static float dht_temperature = NAN;

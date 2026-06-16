@@ -4,6 +4,7 @@
 #include <stdint.h>
 #include "heating_program.h"
 #include "esp_err.h"
+#include "sensor_aggregator.h"
 
 typedef struct {
     bool enabled;            // Thermostat activé/désactivé
@@ -20,10 +21,20 @@ typedef enum {
     TEMP_SOURCE_NONE     // Aucune source valide
 } temperature_source_t;
 
+typedef struct {
+    // On regroupe les données capteurs ici
+    sensor_data_t sensors; 
+    temperature_source_t current_source;
+    // Les autres données du thermostat
+    bool relay_state;
+    float last_known_exterior_temp;
+    float current_calculated_target;
+} thermostat_ctx_t;
+
 
 void thermostat_task(void *pvParameters);
 esp_err_t thermostat_init(void);
-char* thermostat_get_json_status(void);
+char* thermostat_get_json_status(thermostat_ctx_t *ctx);
 
 /**
  * @brief Met à jour les données météo horaires dans le thermostat.
@@ -35,8 +46,11 @@ void thermostat_update_hourly_weather(float temperature, float humidity, int wea
 
 esp_err_t thermostat_get_config(thermostat_config_t *config);
 
-void temperature_set_source(temperature_source_t source);
-
 esp_err_t thermostat_set_config(const thermostat_config_t *config);
 
 void thermostat_get_mode_status_str(char *dest, size_t max_len);
+
+extern thermostat_ctx_t *g_thermostat_ctx;
+
+// Dans thermostat_task.h
+void temperature_set_source(thermostat_ctx_t *ctx, temperature_source_t source);

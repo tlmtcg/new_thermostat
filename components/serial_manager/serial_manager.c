@@ -77,7 +77,7 @@ static void do_get_all(void)
 {
     char *relay_json = relay_get_json_status();
     char *sht31_json = sht31_get_json_status();
-    char *thermostat_json = thermostat_get_json_status();
+    char *thermostat_json = thermostat_get_json_status(g_thermostat_ctx);
 
     cJSON *root = cJSON_CreateObject();
 
@@ -226,9 +226,9 @@ esp_err_t apply_thermostat_json(const char *json) {
     if (cJSON_IsString(temp_source)) {
         // Si tu veux forcer une source de température (ex: "SHT31" ou "DHT")
         if (strcmp(temp_source->valuestring, "SHT31") == 0) {
-            temperature_set_source(TEMP_SOURCE_SHT31);
+            temperature_set_source(g_thermostat_ctx,TEMP_SOURCE_SHT31);
         } else if (strcmp(temp_source->valuestring, "DHT") == 0) {
-            temperature_set_source(TEMP_SOURCE_DHT);
+            temperature_set_source(g_thermostat_ctx,TEMP_SOURCE_DHT);
         }
     }
 
@@ -307,7 +307,7 @@ static void do_get(const char *arg)
     else if (strcmp(arg, "SHT31") == 0)
         print_json_alloc(sht31_get_json_status());
     else if (strcmp(arg, "THERMOSTAT") == 0)
-        print_json_alloc(thermostat_get_json_status());
+        print_json_alloc(thermostat_get_json_status(g_thermostat_ctx));
     else if (strcmp(arg, "ALL") == 0)
         do_get_all();
     else

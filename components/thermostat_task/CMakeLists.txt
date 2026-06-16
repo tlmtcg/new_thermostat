@@ -1,6 +1,6 @@
 idf_component_register(
     SRCS 
-        "thermostat_task.c" 
+        "thermostat_task.c" "sensor_aggregator.c"
     INCLUDE_DIRS 
         "include"
     REQUIRES

@@ -13,15 +13,9 @@
 #include "esp_task_wdt.h"
 
 #define DHT_TEMP_DELTA ((float)atof(CONFIG_DHT_TEMP_DELTA))
-#define DHT_HUM_DELTA  ((float)atof(CONFIG_DHT_HUM_DELTA))
-
-static float last_published_temp = NAN;
-static float last_published_hum = NAN;
-static uint32_t last_publish_ms = 0;
+#define DHT_HUM_DELTA ((float)atof(CONFIG_DHT_HUM_DELTA))
 
 static const char *TAG = "DHT_TASK";
-
-static uint32_t consecutive_errors = 0;
 
 static inline uint32_t now_ms(void)
 {
@@ -30,6 +24,12 @@ static inline uint32_t now_ms(void)
 
 void dht_task(void *pvParameters)
 {
+
+    float last_published_temp = NAN;
+    float last_published_hum = NAN;
+    uint32_t last_publish_ms = 0;
+    uint32_t consecutive_errors = 0;
+
     (void)pvParameters;
     esp_task_wdt_add(NULL);
 
@@ -72,9 +72,7 @@ void dht_task(void *pvParameters)
                     .timestamp_ms = now_ms(),
                     .sensor = {
                         .temperature = runtime->temperature,
-                        .humidity = runtime->humidity
-                    }
-                };
+                        .humidity = runtime->humidity}};
 
                 event_bus_publish(&evt);
 
@@ -107,9 +105,7 @@ void dht_task(void *pvParameters)
                     .net = {
                         .bool_value = false, // Utile ici car on n'utilise pas le bloc sensor
                         .retry_count = consecutive_errors,
-                        .error_code = ret
-                    }
-                };
+                        .error_code = ret}};
 
                 event_bus_publish(&evt);
             }
